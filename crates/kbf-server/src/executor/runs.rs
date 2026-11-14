@@ -480,8 +480,8 @@ impl HostWorker {
     }
 
     /// The output of job `id`, which did not end well: the tails of its `result` if they hold
-    /// any, else one `GetLogs`; redacted of `grants` and cut to the cap. Only the lengths are
-    /// logged.
+    /// any, else one `GetLogs`; redacted of `grants` and cut to the cap. The lengths are logged,
+    /// and the end of the standard error, redacted, as a second line at WARN.
     async fn output(
         &mut self,
         ctx: &Ctx<'_>,
@@ -511,6 +511,17 @@ impl HostWorker {
             unread = output.note.is_some(),
             "the output of a job that did not end well goes with its result"
         );
+        if let Some(excerpt) = output.stderr_excerpt(ctx.cfg.failed_stderr_log_bytes) {
+            // Debug-formatted, so a line break in the job's text cannot start a log line.
+            tracing::warn!(
+                worker = %self.id,
+                %lease,
+                job = id,
+                stderr = ?excerpt,
+                cut = excerpt.len() < output.stderr.trim().len(),
+                "the end of the standard error of a job that did not end well"
+            );
+        }
         output
     }
 

@@ -248,7 +248,10 @@ metric. `GET /metrics` gains the `kbf_executor_*` families, among them the jobs 
 submitted again after a lost answer, those cancelled, those of an earlier process cancelled at
 start, and the jobs seen on a host that missed its grace. The remaining settings are
 `--executor-host-slots` (default 8), `--executor-run-margin-secs` (300; what a job's wall limit
-adds to the action's timeout), `--executor-max-run-secs` and `--executor-default-timeout-secs`
+adds to the action's timeout), `--executor-failed-stderr-log-bytes` (512, at most 8192, 0 for
+none: the end of a failed job's standard error, with the job's secrets redacted, is one WARN line
+of the frontend's log, `the end of the standard error of a job that did not end well`; the whole
+output goes with the result as before), `--executor-max-run-secs` and `--executor-default-timeout-secs`
 (3000), `--executor-call-timeout-secs` (5), `--executor-work-dir` (for the task tool),
 `--executor-allow-plain-http-put` (until the store serves TLS), and
 `--executor-allow-plain-http-grant` (a read listener without TLS, on a farm's own network; both

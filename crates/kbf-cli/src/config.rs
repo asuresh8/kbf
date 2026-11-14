@@ -307,6 +307,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "executor-base-tree-url",
             "executor-call-timeout-secs",
             "executor-default-timeout-secs",
+            "executor-failed-stderr-log-bytes",
             "executor-frontend-id",
             "executor-host-cpus",
             "executor-host-memory-gib",

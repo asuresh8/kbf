@@ -63,6 +63,8 @@ executor-base-tree-url = "https://api.github.com/repos/komira-ai/kbf/releases"
 executor-call-timeout-secs = 5
 # The timeout, in seconds, of an action that names none: at most `--executor-max-run-secs`. Used only with `--executor js-agent`
 executor-default-timeout-secs = 3000
+# The most bytes of a failed job's standard error the frontend writes to its log, at WARN, with the job's secrets redacted: the end of the stream. 0 writes none. The whole output (up to 8 KiB with standard output) goes with the result either way. Used only with `--executor js-agent`
+executor-failed-stderr-log-bytes = 512
 # The name of this frontend on the job service: the value of the `kbf-frontend` label on its jobs, by which a restarted frontend finds and cancels the ones an earlier process left, hashed into every job id, and the name of its virtual workers (`js:<ID>-<n>`). 1 to 63 of letters, digits, `-`, `_` and `.`. It must be different for each frontend (not copied with the config). Used only with `--executor js-agent`
 # executor-frontend-id = "ID"
 # The CPU cores of a virtual worker: the most the farm books on it at once. At least 1. A ceiling, as for `--executor-hosts`. Used only with `--executor js-agent`

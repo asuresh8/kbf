@@ -71,6 +71,7 @@ const BASE_TREE_TIMEOUT: &str = "executor_base_tree_timeout_secs";
 pub(super) const DEFAULT_BASE_TREE_URL: &str =
     "https://api.github.com/repos/komira-ai/kbf/releases";
 const MARGIN: &str = "executor_run_margin_secs";
+const FAILED_STDERR_LOG: &str = "executor_failed_stderr_log_bytes";
 const MAX_RUN: &str = "executor_max_run_secs";
 const DEFAULT_TIMEOUT: &str = "executor_default_timeout_secs";
 const CALL_TIMEOUT: &str = "executor_call_timeout_secs";
@@ -384,6 +385,17 @@ pub(super) fn args() -> Vec<Arg> {
              timeout. Used only with `--executor js-agent`",
             "300",
         ),
+        Arg::new(FAILED_STDERR_LOG)
+            .long("executor-failed-stderr-log-bytes")
+            .value_name("BYTES")
+            .value_parser(clap::value_parser!(u64).range(0..=8192))
+            .default_value("512")
+            .help(
+                "The most bytes of a failed job's standard error the frontend writes to its \
+                 log, at WARN, with the job's secrets redacted: the end of the stream. 0 writes \
+                 none. The whole output (up to 8 KiB with standard output) goes with the result \
+                 either way. Used only with `--executor js-agent`",
+            ),
         number(
             MAX_RUN,
             "executor-max-run-secs",
@@ -608,6 +620,8 @@ fn js_agent_flags(m: &ArgMatches) -> Result<JsAgentFlags, String> {
     config.insecure_argv_secrets = m.get_flag(INSECURE);
     config.delivery = delivery(m);
     config.run_margin = secs(MARGIN);
+    config.failed_stderr_log_bytes = usize::try_from(count(FAILED_STDERR_LOG))
+        .map_err(|e| format!("--executor-failed-stderr-log-bytes: {e}"))?;
     config.max_run = secs(MAX_RUN);
     config.default_timeout = secs(DEFAULT_TIMEOUT);
     config.call_timeout = secs(CALL_TIMEOUT);

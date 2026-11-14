@@ -16,6 +16,9 @@ use crate::worker::PROTOCOL_VERSION;
 
 const GIB: u64 = 1 << 30;
 
+/// The default of [`Config::failed_stderr_log_bytes`]: enough for the line a tool dies with.
+pub const FAILED_STDERR_LOG_BYTES: usize = 512;
+
 /// The drivers a virtual worker's `Hello` lists, in the spelling the scheduler reads a lease
 /// kind's drivers by (`LeaseKind::drivers`): `container` serves an `action` lease, which
 /// becomes a job that needs a share of a host, and `native-whole-machine` serves a
@@ -96,6 +99,10 @@ pub struct Config {
     pub run_margin: Duration,
     /// The timeout of an action that names none: at most [`Config::max_run`].
     pub default_timeout: Duration,
+    /// The most bytes of a failed job's standard error the frontend writes to its log, at WARN,
+    /// with the grants of the job redacted: the end of the stream. `0` writes none; the
+    /// whole attached output stays with the result either way.
+    pub failed_stderr_log_bytes: usize,
     /// The heartbeat interval the workers' `Welcome` names.
     pub heartbeat: Duration,
     /// How often the caller steps the executor.
@@ -223,6 +230,7 @@ impl Config {
             max_run: Duration::from_secs(3000),
             run_margin: Duration::from_secs(300),
             default_timeout: Duration::from_secs(3000),
+            failed_stderr_log_bytes: FAILED_STDERR_LOG_BYTES,
             heartbeat: Duration::from_secs(5),
             poll: Duration::from_millis(500),
             call_timeout: Duration::from_secs(5),

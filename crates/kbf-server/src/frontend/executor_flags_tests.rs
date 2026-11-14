@@ -220,6 +220,7 @@ fn js_agent_settings_become_the_executors_config() {
         "--executor-max-run-secs=1800",
         "--executor-default-timeout-secs=900",
         "--executor-call-timeout-secs=3",
+        "--executor-failed-stderr-log-bytes=2048",
     ])
     .expect("flags");
     let js = flags.executor.js.expect("js-agent");
@@ -244,6 +245,7 @@ fn js_agent_settings_become_the_executors_config() {
     assert_eq!(config.max_run, Duration::from_secs(1800));
     assert_eq!(config.default_timeout, Duration::from_secs(900));
     assert_eq!(config.call_timeout, Duration::from_secs(3));
+    assert_eq!(config.failed_stderr_log_bytes, 2048);
 }
 
 /// Catches `--executor-locate` not becoming the executor's setting, or being on by default: it
@@ -290,6 +292,7 @@ fn the_defaults_are_the_executors_own() {
     assert_eq!(config.max_run, own.max_run);
     assert_eq!(config.default_timeout, own.default_timeout);
     assert_eq!(config.call_timeout, own.call_timeout);
+    assert_eq!(config.failed_stderr_log_bytes, own.failed_stderr_log_bytes);
     assert_eq!(own.delivery, config.delivery);
     assert_eq!(config.network, own.network);
     assert_eq!(config.allow_open_network, own.allow_open_network);
@@ -723,4 +726,16 @@ fn the_job_network_is_logged_at_start() {
         "{line}"
     );
     assert!(!text.contains("WARN"), "{text}");
+}
+
+/// Catches a log excerpt that cannot be bounded or turned off, or one allowed past the output a
+/// result holds: `--executor-failed-stderr-log-bytes` takes 0 (none) to 8192 and refuses more.
+#[test]
+fn the_stderr_log_bytes_take_zero_to_the_output_cap() {
+    for ok in ["0", "8192"] {
+        let flag = format!("--executor-failed-stderr-log-bytes={ok}");
+        js_with(&[flag.as_str()]).expect("taken");
+    }
+    let why = js_with(&["--executor-failed-stderr-log-bytes=8193"]).expect_err("refused");
+    assert!(why.contains("--executor-failed-stderr-log-bytes"), "{why}");
 }

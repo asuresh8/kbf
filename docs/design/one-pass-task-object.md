@@ -266,7 +266,7 @@ is that the Command's share is the same for both formats). The outputs' own shar
 MiB with one-pass (inferred), plus the small files, which both formats read once.
 
 **Task overhead per action.** One-pass is faster by 42 ms at the median (measured: 272 - 230), and by 27 to 150 ms across
-rounds (measured pairs: 380 vs 230, 257 vs 227, 272 vs 236); the first packs round also pays for a cold start of the harness's
+rounds (measured pairs: 380 vs 230, 257 vs 227, 272 vs 236); the first packs round (380 ms) is slower than its later two, which I take (inferred) to be a cold start of the harness's
 files, so the median is the figure to quote, not the mean (303 against 231 ms, a 72 ms difference, measured). The gap is the
 second read of the 170 MiB file from a warm page cache plus the second object (the large object's separate create, write and
 rename); on a cold cache or a slower disk the second read costs more (inferred; not measured here). The output phase is

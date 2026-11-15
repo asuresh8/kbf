@@ -156,7 +156,7 @@ points at a span of it.
    refuses the write is logged and costs the reuse, never the run (`a_manifest_that_cannot_be_published_costs_the_reuse_and_not_the_run`).
    The memo is the existing one: bounded, expiring after ten minutes, forgotten by input root.
 
-All of it exists only for an object the gate (`--task-out-format one-pass`, default `packs`) made a task write; an object of
+All of it exists only for an object the gate (`--task-out-format one-pass`, the default since the release after v0.0.83) made a task write; an object of
 the packs format is read as before and nothing is derived. The tail bounds of 5.1 are config as well: the manifest cap
 (`--task-max-object-manifest-bytes`, default 4 MiB) and the allowance of a record (`--task-object-bytes-per-entry`, default
 1024), with `--task-max-object-entries`.
@@ -214,12 +214,13 @@ the first read that hashes it. Nothing about that changes.
 Additive: a new object kind under the same key, a new flag, no field of any shipped format changes.
 
 - **Reader first.** The frontend reads both formats from the release that adds this. It does not need telling which.
-- **Writer gated by the frontend.** `--task-out-format` (config key `task-out-format`) is `packs` (default) or
-  `one-pass`. Only when it is `one-pass` does the executor add `--object-format one-pass` to the task's arguments;
-  otherwise the arguments are byte for byte today's, so an old `kbf-task` never sees a flag it does not know.
+- **Writer gated by the frontend.** `--task-out-format` (config key `task-out-format`) is `one-pass` (default, once
+  this was rolled out) or `packs` (deprecated, removed in a later release). Only when it is `one-pass` does the executor add
+  `--object-format one-pass` to the task's arguments; with `packs` the arguments are byte for byte the old ones, so an
+  old `kbf-task` never sees a flag it does not know.
 - **Rollout.** (1) Ship the release to every frontend and the base tree that holds `kbf-task`. (2) When every frontend and
-  every task image is that release, set `task-out-format = "one-pass"` and restart the frontends. Rollback: set it back
-  to `packs`; objects already written stay readable by the new frontend, and a frontend rolled back to a release before
+  every task image is that release, set `task-out-format = "one-pass"` and restart the frontends (from the release that makes it the default this is
+  the default and the key only pins it). Rollback: set it back to `packs`; objects already written stay readable by the new frontend, and a frontend rolled back to a release before
   this one refuses a one-pass object, so roll the config back before the binary.
 - **The test** that runs the previous release on new data and the reverse: `one_pass_and_packs_ingest_side_by_side` (frontend
   reads an old pack and a one-pass object in the same farm) and the task test `without_the_one_pass_format_the_pack_is_the_one_of_before`, which with no flag reads the pack the

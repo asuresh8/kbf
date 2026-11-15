@@ -61,11 +61,11 @@ pub enum RootError {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OutFormat {
     /// Packs and large objects, planned from the digests: what every release before the
-    /// one-pass object writes, and the default.
-    #[default]
+    /// one-pass object writes. Deprecated; the frontend still reads both.
     Packs,
-    /// One object per action, written in one pass (docs/design/one-pass-task-object.md). The
-    /// frontend reads both; set this only once every frontend and every task image does.
+    /// One object per action, written in one pass (docs/design/one-pass-task-object.md): the
+    /// default. A task image of a release before it refuses the flag this sends.
+    #[default]
     OnePass,
 }
 

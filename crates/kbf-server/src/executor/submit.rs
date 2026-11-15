@@ -30,13 +30,13 @@ use kbf_proto::worker::Start;
 use kbf_types::LeaseId;
 use ring::digest::{SHA256, digest};
 
-use crate::executor::Ctx;
 use crate::executor::config::Config;
 use crate::executor::out::{PutDirRoots, TASK_IN_TREE, TaskOut};
 use crate::executor::outcome::Settled;
 use crate::executor::output::Grants;
 use crate::executor::task::{PackKey, TaskArgs, build_id, put_dir_argv};
 use crate::executor::traits::{InputsError, MintError, PresignError};
+use crate::executor::{Ctx, Ingest, Inputs, Presign};
 
 /// The label every job of this executor carries, valued with the frontend's id: how a
 /// restarted frontend finds the jobs it made.
@@ -175,14 +175,36 @@ impl Booking {
     }
 }
 
+/// What preparing a run reads, owned: a preparation runs on a task of its own, beyond the pass
+/// that began it and the window of its `Start`, so it holds no borrow of the pass.
+#[derive(Clone)]
+pub(super) struct Preparer {
+    pub(super) cfg: Config,
+    inputs: Arc<dyn Inputs>,
+    ingest: Arc<dyn Ingest>,
+    presign: Arc<dyn Presign>,
+}
+
+impl Ctx<'_> {
+    /// The owned parts a preparation reads.
+    pub(super) fn preparer(&self) -> Preparer {
+        Preparer {
+            cfg: self.cfg.clone(),
+            inputs: Arc::clone(&self.deps.inputs),
+            ingest: Arc::clone(&self.deps.ingest),
+            presign: Arc::clone(&self.deps.presign),
+        }
+    }
+}
+
 /// The job of `lease`, which runs `action` with `booking`, with its pack key.
 pub(super) async fn prepare(
-    ctx: &Ctx<'_>,
+    ctx: &Preparer,
     lease: LeaseId,
     action: &Digest,
     booking: Booking,
 ) -> Result<Arc<Prepared>, Settled> {
-    let facts = ctx.deps.inputs.action(action).await?;
+    let facts = ctx.inputs.action(action).await?;
     let timeout = facts.timeout.unwrap_or(ctx.cfg.default_timeout);
     require(timeout <= ctx.cfg.max_run, || {
         format!("the action's timeout {timeout:?} is over the executor's limit")
@@ -196,7 +218,7 @@ pub(super) async fn prepare(
                 .to_owned()
         })?;
         let key = minted(ctx, lease, action, wall).await?;
-        let tree = ctx.deps.inputs.tree(lease).await?;
+        let tree = ctx.inputs.tree(lease).await?;
         let job = PutDirJob {
             roots,
             dir: &key,
@@ -208,7 +230,6 @@ pub(super) async fn prepare(
     }
     let key = minted(ctx, lease, action, wall).await?;
     let pack = ctx
-        .deps
         .presign
         .put_url(&key, wall, ctx.cfg.max_pack_bytes)
         .await?;
@@ -217,7 +238,7 @@ pub(super) async fn prepare(
     if !ctx.cfg.allow_plain_http_put && !pack.expose().starts_with("https://") {
         return Err(Settled::Infra("the pack url is not https".to_owned()));
     }
-    let grant = ctx.deps.inputs.read_grant(lease, action, wall).await?;
+    let grant = ctx.inputs.read_grant(lease, action, wall).await?;
     // The bearer token goes to the task: not over a scheme that sends it in clear, unless the
     // operator said the job network is trusted for it.
     if !ctx.cfg.allow_plain_http_grant && !grant.url.starts_with("https://") {
@@ -265,12 +286,12 @@ pub(super) async fn prepare(
 
 /// The key of `lease`'s run, from the frontend's ingest.
 async fn minted(
-    ctx: &Ctx<'_>,
+    ctx: &Preparer,
     lease: LeaseId,
     action: &Digest,
     wall: Duration,
 ) -> Result<PackKey, Settled> {
-    let minted = ctx.deps.ingest.mint(lease, action, wall).await;
+    let minted = ctx.ingest.mint(lease, action, wall).await;
     minted.map_err(|e| match e {
         MintError::Refused(why) => Settled::Invalid(format!("no key for the pack: {why}")),
         MintError::Unavailable(why) => Settled::Infra(format!("no key for the pack: {why}")),
@@ -278,7 +299,7 @@ async fn minted(
 }
 
 /// The labels of every job: the frontend's id and this process's.
-fn labels(ctx: &Ctx<'_>) -> BTreeMap<String, String> {
+fn labels(ctx: &Preparer) -> BTreeMap<String, String> {
     [
         (FRONTEND_LABEL, ctx.cfg.frontend.as_str()),
         (INSTANCE_LABEL, ctx.cfg.instance.as_str()),
@@ -299,7 +320,7 @@ struct PutDirJob<'a> {
 /// The job of `lease`'s run of `job`: the tree is the root, the tool of the base tree runs, the
 /// directory is at `/out`, and nothing else is given.
 fn put_dir_spec(
-    ctx: &Ctx<'_>,
+    ctx: &Preparer,
     job: &PutDirJob<'_>,
     lease: LeaseId,
     action: &Digest,

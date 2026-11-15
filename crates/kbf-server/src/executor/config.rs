@@ -114,6 +114,11 @@ pub struct Config {
     pub call_timeout: Duration,
     /// How long a pass goes on starting waiting tasks: past it the rest wait for the next.
     pub pass_budget: Duration,
+    /// How long the inputs of one run (its action, its input tree published into the store,
+    /// its keys) may take to prepare. A preparation is not stopped by the `Start`'s window,
+    /// which only the submit must meet: it goes on until this ends, so a tree published by a
+    /// run whose window passed is there for the run the farm starts next.
+    pub prepare_limit: Duration,
     /// T: how long a worker goes on with its jobs after the farm last acknowledged a
     /// heartbeat, or the job service last answered a call about a job it holds, before it
     /// cancels them and goes silent.
@@ -235,6 +240,7 @@ impl Config {
             poll: Duration::from_millis(1000),
             call_timeout: Duration::from_secs(5),
             pass_budget: Duration::from_secs(10),
+            prepare_limit: Duration::from_secs(300),
             fence_after: SELF_FENCE,
             delivery: Delivery::InsecureArgv,
             insecure_argv_secrets: false,
@@ -322,7 +328,8 @@ impl Config {
             (
                 !self.call_timeout.is_zero()
                     && self.call_timeout < self.fence_after
-                    && !self.pass_budget.is_zero(),
+                    && !self.pass_budget.is_zero()
+                    && !self.prepare_limit.is_zero(),
                 ConfigError::Bounds,
             ),
             (

@@ -2,7 +2,6 @@
 //! look at the lock its leftover holds.
 
 #![cfg(target_os = "linux")]
-#![expect(dead_code, reason = "each test binary uses some of these")]
 
 use std::path::Path;
 use std::time::Duration;
@@ -19,12 +18,11 @@ impl Drop for Leftover<'_> {
     fn drop(&mut self) {
         let pid = std::fs::read_to_string(self.0)
             .ok()
-            .and_then(|pid| pid.trim().parse::<i32>().ok());
+            .and_then(|pid| pid.trim().parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw);
         if let Some(pid) = pid {
-            if let Some(pid) = rustix::process::Pid::from_raw(pid) {
-                // Already gone is fine.
-                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-            }
+            // Already gone is fine.
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
     }
 }
@@ -70,10 +68,4 @@ pub fn scratch(name: &str) -> TestDir {
     let dir = TestDir::under(std::env::temp_dir(), &format!("kbf-task-job-{name}"));
     std::fs::create_dir_all(dir.join("root")).expect("root");
     dir
-}
-
-/// Whether the lock is free now.
-pub fn lock_is_free(dir: &TestDir) -> bool {
-    let file = std::fs::File::open(dir.join("lock")).expect("lock");
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
 }

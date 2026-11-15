@@ -14,7 +14,13 @@ use kbf_task::network::Layers;
 use kbf_task::run::Job;
 
 mod job_support;
-use job_support::{Leftover, lock_is_free, run_probe, scratch};
+use job_support::{Leftover, run_probe, scratch};
+
+/// Whether the lock is free now.
+fn lock_is_free(dir: &kbf_testkit::dir::TestDir) -> bool {
+    let file = std::fs::File::open(dir.join("lock")).expect("lock");
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
+}
 
 /// `linger` leaves a process in a group of its own: only the subreaper reaches it, as it is handed
 /// to this process when its parent ends. It is gone and reaped when the run returns, also when

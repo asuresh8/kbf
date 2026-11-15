@@ -216,3 +216,224 @@ fn the_executors_put_dir_command_line_parses() {
     assert_eq!(cli.lease, "7-3");
     assert_eq!(cli.deadline_ms, 90_000);
 }
+
+/// The flags of a tree job over `root` running `action` into `out` as one object.
+fn one_pass_cli(root: &Path, action: &Digest, out: &Path) -> Cli {
+    let extra = out_flags(out);
+    flags(
+        root,
+        action,
+        &[&extra[0], &extra[1], "--object-format=one-pass"],
+    )
+    .expect("flags")
+}
+
+/// The manifest and the entries of the one-pass object `object`, each record checked against
+/// its entry's CRC and digest.
+fn read_one_pass(object: &[u8]) -> (TaskManifest, Vec<kbf_segments::IndexEntry>) {
+    use kbf_task_pack::one_pass::{TRAILER_LEN, Tail, Trailer};
+    let len = object.len() as u64;
+    let trailer = Trailer::parse(&object[object.len() - TRAILER_LEN..], len).expect("trailer");
+    let tail = &object[object.len() - usize::try_from(trailer.tail_len()).expect("fits")..];
+    let tail = Tail::parse(&trailer, tail).expect("tail");
+    for entry in &tail.entries {
+        let range = entry.range();
+        entry
+            .verify(&object[range.start as usize..range.end as usize])
+            .expect("a record");
+    }
+    let manifest = TaskManifest::parse_with(&tail.manifest, MAX_LARGE_BYTES).expect("manifest");
+    (manifest, tail.entries)
+}
+
+/// Asserts that `--object-format one-pass` commits `pack` alone, as one object whose trailer
+/// leads to the manifest and the index, whose index has the output file, stdout and stderr, and
+/// whose manifest says one pack, no large object, and one pass in its timing.
+#[tokio::test]
+async fn a_one_pass_run_commits_one_object_with_the_manifest_and_index_at_the_end() {
+    let (dir, digest) = copy_tree("one-pass-e2e");
+    let out = put_dir(&dir);
+    assert_eq!(
+        main_with(&one_pass_cli(&dir, &digest, &out)).await,
+        ExitCode::SUCCESS
+    );
+    assert_eq!(names(&out), ["pack"]);
+    let object = std::fs::read(out.join("pack")).expect("pack");
+    let (manifest, entries) = read_one_pass(&object);
+    assert_eq!(manifest.action, digest);
+    assert_eq!(manifest.exit_code, 0);
+    assert_eq!(manifest.packs, 1);
+    assert!(manifest.large.is_empty());
+    assert_eq!(manifest.output_files[0].digest, sha256(b"hi\n"));
+    assert_eq!(manifest.inputs, Some(input_stats()));
+    let held: Vec<_> = entries.iter().map(|e| e.digest).collect();
+    assert!(held.contains(&sha256(b"hi\n")));
+    for digest in manifest.output_digests() {
+        assert!(held.contains(&digest), "{digest}");
+    }
+    let timing = manifest.timing;
+    assert_eq!(timing.walk_ms, Some(timing.pack_ms), "{timing:?}");
+    assert_eq!(
+        (timing.hash_ms, timing.write_ms, timing.commit_ms),
+        (None, None, None)
+    );
+}
+
+/// Asserts that the default, and `--object-format packs`, still write the pack of before: the
+/// segment whose record 0 is the manifest.
+#[tokio::test]
+async fn without_the_one_pass_format_the_pack_is_the_one_of_before() {
+    for (name, extra) in [("default", None), ("packs", Some("--object-format=packs"))] {
+        let (dir, digest) = copy_tree(&format!("one-pass-off-{name}"));
+        let out = put_dir(&dir);
+        let mut cli = out_cli(&dir, &digest, &out);
+        if extra.is_some() {
+            let flag = out_flags(&out);
+            cli = flags(&dir, &digest, &[&flag[0], &flag[1], extra.expect("flag")]).expect("flags");
+        }
+        assert_eq!(main_with(&cli).await, ExitCode::SUCCESS);
+        let pack = std::fs::read(out.join("pack")).expect("pack");
+        let manifest = read_manifest_with(&pack, MAX_LARGE_BYTES).expect("a segment pack");
+        assert_eq!(manifest.output_files[0].digest, sha256(b"hi\n"), "{name}");
+    }
+}
+
+/// Asserts that `--object-format` is refused without `--stage-and-commit`, and that its values
+/// are the two formats.
+#[test]
+fn the_object_format_flag_needs_the_put_directory() {
+    let action = format!("--action={}/12", "ab".repeat(32));
+    let base = ["kbf-task", "--tree", "--lease=lease-1", &action];
+    let mut args = base.to_vec();
+    args.extend(["--pack-url-file=/x", "--object-format=one-pass"]);
+    let error = Cli::try_parse_from(args).err().expect("refused");
+    assert_eq!(error.kind(), ClapKind::ArgumentConflict);
+    let mut args = base.to_vec();
+    args.extend(["--stage-and-commit", "--object-format=tar"]);
+    let error = Cli::try_parse_from(args).err().expect("refused");
+    assert_eq!(error.kind(), ClapKind::InvalidValue);
+}
+
+/// Asserts that a Command whose outputs are a directory of files (two equal, one larger than a
+/// chunk twice over) gives an object holding each distinct blob once: the Tree, its Directory,
+/// the files, and that the equal large files are dead bytes, never a second entry.
+#[tokio::test]
+async fn a_directory_of_equal_files_is_one_entry_per_blob_and_dead_bytes_for_a_repeated_large_one()
+{
+    let dir = scratch("one-pass-dir");
+    let script = "mkdir d && head -c 3145728 /dev/zero > d/big && cp d/big d/copy && echo a > d/a && cp d/a d/b";
+    let command = command(&["sh", "-c", script], "", &["d"]);
+    let digest = lay_out(&dir, &action_of(&command), &command);
+    let out = put_dir(&dir);
+    assert_eq!(
+        main_with(&one_pass_cli(&dir, &digest, &out)).await,
+        ExitCode::SUCCESS
+    );
+    let object = std::fs::read(out.join("pack")).expect("pack");
+    let (manifest, entries) = read_one_pass(&object);
+    assert_eq!(manifest.exit_code, 0);
+    let zeros = sha256(&vec![0u8; 3_145_728]);
+    assert_eq!(entries.iter().filter(|e| e.digest == zeros).count(), 1);
+    let small = sha256(b"a\n");
+    assert_eq!(entries.iter().filter(|e| e.digest == small).count(), 1);
+    let tree = entries
+        .iter()
+        .find(|e| e.digest == manifest.output_directories[0].tree)
+        .expect("the Tree is a record");
+    let range = tree.range();
+    let tree =
+        reapi::Tree::decode(&object[range.start as usize..range.end as usize]).expect("tree");
+    let root = tree.root.expect("root");
+    let named: Vec<_> = root
+        .files
+        .iter()
+        .map(|f| digest::from_reapi(f.digest.as_ref().expect("digest")).expect("digest"))
+        .collect();
+    assert_eq!(named.len(), 4);
+    for digest in named {
+        assert!(entries.iter().any(|e| e.digest == digest));
+    }
+    // The 3 MiB file is stored once as an entry and its copy is dead bytes after it, so the object
+    // is longer than the entries' bytes by the copy's size.
+    let blobs: u64 = entries.iter().map(|e| e.digest.size_bytes).sum();
+    assert!(
+        object.len() as u64 >= blobs + 3_145_728,
+        "{} bytes holding {blobs} of blobs",
+        object.len()
+    );
+}
+
+/// Asserts the exit codes of a one-pass run that cannot be written: a file that cannot be
+/// created, a write the file refuses while the outputs are read (a full disk), and a commit the
+/// store refuses are all exit 13, and nothing is left in the put directory.
+#[tokio::test]
+async fn a_one_pass_object_that_cannot_be_written_or_committed_is_exit_13_and_leaves_nothing() {
+    struct Full;
+    impl std::io::Write for Full {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    for what in ["create", "write", "commit"] {
+        let dir = scratch(&format!("one-pass-fail-{what}"));
+        let script = "head -c 2097152 /dev/zero > big";
+        let command = command(&["sh", "-c", script], "", &["big"]);
+        let digest = lay_out(&dir, &action_of(&command), &command);
+        let out = put_dir(&dir);
+        let mut sink = OutDir::open(&out).expect("open");
+        sink = match what {
+            "create" => sink.with_create(|_| Err(std::io::Error::from_raw_os_error(libc::EACCES))),
+            "write" => sink.with_create(|_| Ok(Box::new(Full))),
+            _ => sink.with_rename(|from, to| match to.extension() {
+                Some(ext) if ext == "part" => std::fs::rename(from, to),
+                _ => Err(std::io::Error::from_raw_os_error(libc::EEXIST)),
+            }),
+        };
+        let failure = execute_out_dir(
+            &one_pass_cli(&dir, &digest, &out),
+            &dir,
+            &sink,
+            &Limits::real(),
+        )
+        .await
+        .expect_err(what);
+        assert_eq!(failure.exit_code(), EXIT_PUT, "{what}: {failure}");
+        assert!(names(&out).is_empty(), "{what}: {:?}", names(&out));
+    }
+}
+
+/// Asserts that a manifest naming a blob the object does not hold is refused as an invalid pack
+/// (exit 12) before anything is committed, and the `.part` file is removed.
+#[tokio::test]
+async fn a_manifest_naming_a_blob_the_object_lacks_is_refused() {
+    let dir = scratch("one-pass-missing");
+    let out = put_dir(&dir);
+    let sink = OutDir::open(&out).expect("open");
+    let run = sink.object().expect("object");
+    let mut manifest = TaskManifest {
+        lease: "lease-1".to_owned(),
+        action: sha256(b"action"),
+        exit_code: 0,
+        stdout: Some(sha256(b"never written")),
+        stderr: None,
+        output_files: Vec::new(),
+        output_directories: Vec::new(),
+        output_symlinks: Vec::new(),
+        timing: kbf_task_pack::Timing::default(),
+        usage: kbf_task_pack::Usage::default(),
+        packs: 1,
+        large: Vec::new(),
+        inputs: None,
+        objects: None,
+    };
+    let failure = run.finish(&mut manifest).await.expect_err("refused");
+    assert_eq!(failure.exit_code(), crate::task::EXIT_PACK);
+    assert!(
+        matches!(&failure, Failure::Pack(e) if e.detail == crate::pack::INVALID_PACK),
+        "{failure}"
+    );
+    assert!(names(&out).is_empty());
+}

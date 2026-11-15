@@ -169,6 +169,7 @@ pub mod put_urls;
 pub mod relay;
 pub mod run;
 pub mod sandbox;
+pub mod spool;
 pub mod task;
 pub mod tree;
 

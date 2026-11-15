@@ -43,7 +43,8 @@ use crate::digest;
 use crate::fetch::{BlobSource, FetchError, HttpBlobSource, LocatedSource, native_roots};
 use crate::inputs::{Inputs, fetch_inputs};
 use crate::network;
-use crate::outputs::{Blobs, OutputLimits, collect_outputs};
+use crate::out_dir::OutDirError;
+use crate::outputs::{Blobs, OutputLimits, collect_outputs, collect_spooled};
 use crate::pack::{PackError, build, build_extra};
 use crate::place::{manifest_reserve, output_cap, place};
 use crate::plan::Limits;
@@ -54,6 +55,7 @@ use crate::put::{
 use crate::put_urls::PutUrls;
 use crate::run::{Run, RunError, output_paths, run};
 use crate::sandbox;
+use crate::spool::Spool;
 
 /// Exit code: an input could not be read, checked or laid out.
 pub const EXIT_FETCH: u8 = 10;
@@ -163,6 +165,18 @@ pub struct Cli {
         conflicts_with_all = ["pack_url_file", "pack_url", "put_urls_file", "put_urls"]
     )]
     pub out_dir: Option<PathBuf>,
+    /// The shape of what `--stage-and-commit` writes: `packs` (the default, as when the flag is
+    /// left out) the pack and large objects planned from the digests, or `one-pass` the single
+    /// object `pack` written while the outputs are read, its manifest and index at the end
+    /// (`crate::spool`, docs/design/one-pass-task-object.md). The frontend that reads the
+    /// objects must know the one-pass format before a task is told to write it. Refused with the
+    /// URL flags, one of which a run without `--stage-and-commit` must give.
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with_all = ["pack_url_file", "pack_url", "put_urls_file", "put_urls"]
+    )]
+    pub object_format: Option<ObjectFormat>,
     /// The base URL of the read grant: blobs are read from `<base>/<hex>/<size>`. Required, with
     /// `--grant-token-file` or `--grant-token`, unless `--tree` is given.
     #[arg(
@@ -262,6 +276,16 @@ pub struct Cli {
     /// has none, and its Command gets no PID namespace.
     #[arg(skip)]
     pub relay: Option<PathBuf>,
+}
+
+/// What `--stage-and-commit` writes (`--object-format`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ObjectFormat {
+    /// Packs and large objects, planned from the digests: the format before one-pass.
+    #[default]
+    Packs,
+    /// One object, written while the outputs are read.
+    OnePass,
 }
 
 impl Cli {
@@ -516,6 +540,17 @@ pub(crate) async fn collected(
     inputs: Inputs,
     limits: &Limits,
 ) -> Result<(TaskManifest, Blobs), Failure> {
+    collected_into(cli, inputs, limits, None).await
+}
+
+/// [`collected`] writing the blobs into `spool` as they are read, when there is one: the
+/// returned blobs are then empty and `limits` bound nothing.
+pub(crate) async fn collected_into(
+    cli: &Cli,
+    inputs: Inputs,
+    limits: &Limits,
+    spool: Option<&Arc<Spool>>,
+) -> Result<(TaskManifest, Blobs), Failure> {
     let Inputs {
         action,
         command,
@@ -555,16 +590,43 @@ pub(crate) async fn collected(
 
     let packing = Instant::now();
     let paths: Vec<String> = output_paths(&command).into_iter().cloned().collect();
-    let outputs = collect_outputs(
-        &root,
-        &command.working_directory,
-        &paths,
-        &stdout,
-        &stderr,
-        cli.limits,
-        output_cap(limits),
-    )
-    .await?;
+    let outputs = match spool {
+        Some(spool) => {
+            let collecting = collect_spooled(
+                &root,
+                &command.working_directory,
+                &paths,
+                &stdout,
+                &stderr,
+                cli.limits,
+                spool,
+            );
+            // A write the object's file refused is a put failure (exit 13), not an output that
+            // could not be read.
+            match (collecting.await, spool.write_failure()) {
+                (Err(_), Some(source)) => {
+                    return Err(OutDirError::Write {
+                        name: crate::out_dir::pack_name(0),
+                        source,
+                    }
+                    .into());
+                }
+                (done, _) => done?,
+            }
+        }
+        None => {
+            collect_outputs(
+                &root,
+                &command.working_directory,
+                &paths,
+                &stdout,
+                &stderr,
+                cli.limits,
+                output_cap(limits),
+            )
+            .await?
+        }
+    };
     // The manifest is part of pack 0, so the time to build the packs ends here.
     let pack_ms = millis(packing.elapsed());
     let result = &outputs.result;

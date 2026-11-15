@@ -60,6 +60,17 @@ impl PackError {
     }
 }
 
+impl PackError {
+    /// The refusal of a manifest that names a blob the object does not hold.
+    #[must_use]
+    pub fn missing(digest: &kbf_types::Digest) -> Self {
+        Self {
+            detail: INVALID_PACK,
+            message: format!("the manifest names {digest}, which the object does not hold"),
+        }
+    }
+}
+
 impl fmt::Display for PackError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.detail, self.message)

@@ -19,13 +19,15 @@ use std::fs::File;
 use std::io::{Read, Seek};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use kbf_outputs::{OutputsError, Store, StoreError, digest_of, store_file};
+use kbf_outputs::{OutputsError, Store, StoreError, Tee, digest_of, store_file};
 use kbf_proto::reapi::{ActionResult, Digest};
 use sha2::{Digest as _, Sha256};
 
 pub use kbf_outputs::OutputLimits;
+
+use crate::spool::Spool;
 
 /// How many blobs the recorder accepts at once; it does no I/O, so any small number serves.
 const IN_FLIGHT: usize = 4;
@@ -189,6 +191,8 @@ impl Read for BlobReader<'_> {
 struct Recorder {
     cap: u64,
     blobs: Mutex<Blobs>,
+    /// Where the blobs go instead of being kept, for a one-pass object ([`crate::spool`]).
+    spool: Option<Arc<Spool>>,
 }
 
 impl Recorder {
@@ -196,6 +200,16 @@ impl Recorder {
         Self {
             cap,
             blobs: Mutex::new(Blobs::default()),
+            spool: None,
+        }
+    }
+
+    /// A recorder that keeps nothing: every blob is written to `spool`, a file larger than one
+    /// chunk as it is hashed. There is no byte cap.
+    fn spooling(spool: Arc<Spool>) -> Self {
+        Self {
+            spool: Some(spool),
+            ..Self::new(u64::MAX)
         }
     }
 
@@ -225,11 +239,18 @@ impl Recorder {
 impl Store for Recorder {
     async fn put(&self, bytes: Vec<u8>) -> Result<Digest, StoreError> {
         let digest = digest_of(&bytes);
+        if let Some(spool) = &self.spool {
+            spool.put(&digest, bytes).await?;
+            return Ok(digest);
+        }
         self.record(&digest, || Blob::Bytes(bytes))?;
         Ok(digest)
     }
 
     async fn put_file(&self, mut file: File, digest: Digest) -> Result<Digest, StoreError> {
+        if self.spool.is_some() {
+            return Err("a file was handed over although its bytes go to the object".into());
+        }
         let start = file.stream_position()?;
         self.record(&digest, || Blob::File { file, start })?;
         Ok(digest)
@@ -237,6 +258,12 @@ impl Store for Recorder {
 
     fn in_flight(&self) -> usize {
         IN_FLIGHT
+    }
+
+    fn tee(&self) -> Option<Arc<dyn Tee>> {
+        self.spool
+            .as_ref()
+            .map(|spool| Arc::clone(spool) as Arc<dyn Tee>)
     }
 }
 
@@ -266,6 +293,56 @@ pub async fn collect_outputs(
     cap: u64,
 ) -> Result<Outputs, OutputsError> {
     let recorder = Recorder::new(cap);
+    gather(
+        recorder,
+        root,
+        working_directory,
+        paths,
+        stdout,
+        stderr,
+        limits,
+    )
+    .await
+}
+
+/// [`collect_outputs`] for a one-pass object: no blob is kept. Each is written to `spool` as it
+/// is read, a file larger than one chunk as it is hashed, so every output is read once. The
+/// blobs of the returned [`Outputs`] are empty and there is no byte cap.
+///
+/// # Errors
+/// An [`OutputsError`], as [`collect_outputs`] but for the cap; one that is an `Io` or `Store`
+/// error may be the spool's ([`Spool::write_failure`] says).
+pub async fn collect_spooled(
+    root: &Path,
+    working_directory: &str,
+    paths: &[String],
+    stdout: &Path,
+    stderr: &Path,
+    limits: OutputLimits,
+    spool: &Arc<Spool>,
+) -> Result<Outputs, OutputsError> {
+    let recorder = Recorder::spooling(Arc::clone(spool));
+    gather(
+        recorder,
+        root,
+        working_directory,
+        paths,
+        stdout,
+        stderr,
+        limits,
+    )
+    .await
+}
+
+async fn gather(
+    recorder: Recorder,
+    root: &Path,
+    working_directory: &str,
+    paths: &[String],
+    stdout: &Path,
+    stderr: &Path,
+    limits: OutputLimits,
+) -> Result<Outputs, OutputsError> {
     let mut result = ActionResult::default();
     kbf_outputs::collect(
         &recorder,
@@ -508,6 +585,67 @@ mod tests {
             .record(&digest_of(b"ab"), || Blob::Bytes(b"ab".to_vec()))
             .expect("record");
         assert_eq!(recorder.in_flight(), IN_FLIGHT);
+    }
+
+    /// Collecting into a spool writes every blob to the object, a large file included and read
+    /// once; the recorder keeps nothing and refuses a file handed to it whole.
+    #[tokio::test]
+    async fn a_spooled_collection_writes_every_blob_to_the_object() {
+        use kbf_task_pack::one_pass::{TRAILER_LEN, Tail, Trailer};
+
+        #[derive(Clone, Default)]
+        struct Shared(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (dir, work, out, err) = rig("spooled");
+        let large: Vec<u8> = (0..(CHUNK_BYTES + 9)).map(|i| (i % 7) as u8).collect();
+        std::fs::write(work.join("large"), &large).expect("large");
+        std::fs::write(work.join("small"), b"small").expect("small");
+        let file = Shared::default();
+        let spool = Spool::new(Box::new(file.clone()));
+        let paths = ["large".to_owned(), "small".to_owned()];
+        let outputs = collect_spooled(
+            &work,
+            "",
+            &paths,
+            &out,
+            &err,
+            OutputLimits::default(),
+            &spool,
+        )
+        .await
+        .expect("collected");
+        assert!(outputs.blobs.is_empty());
+        spool.finish(b"{}").expect("finished");
+        let bytes = file.0.lock().expect("lock").clone();
+        let trailer = Trailer::parse(&bytes[bytes.len() - TRAILER_LEN..], bytes.len() as u64)
+            .expect("trailer");
+        let tail = &bytes[bytes.len() - usize::try_from(trailer.tail_len()).expect("fits")..];
+        let held: Vec<_> = Tail::parse(&trailer, tail)
+            .expect("tail")
+            .entries
+            .into_iter()
+            .map(|e| e.digest)
+            .collect();
+        for blob in [&large[..], b"small", b"to stdout", b"to stderr"] {
+            assert!(held.contains(&kbf_segments::sha256(blob)));
+        }
+        let recorder = Recorder::spooling(Spool::new(Box::new(Shared::default())));
+        let file = std::fs::File::open(out).expect("open");
+        let why = recorder
+            .put_file(file, digest_of(b"x"))
+            .await
+            .expect_err("refused");
+        assert!(why.to_string().contains("handed over"), "{why}");
+        drop(dir);
     }
 }
 

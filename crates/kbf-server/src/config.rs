@@ -726,7 +726,7 @@ pub struct Args {
         requires = "state_store"
     )]
     pub member_dwell_secs: u64,
-    /// Build history: `--history-objects` and `--history-index-root`.
+    /// Build history: `--history-objects`, `--history-credentials-file` and `--history-index-root`.
     #[command(flatten)]
     pub history: crate::history::HistoryFlags,
     /// The retired release poller's and release store's flags: accepted, hidden, ignored.

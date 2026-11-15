@@ -244,6 +244,7 @@ pub const ALLOWED: &[&str] = &[
     "member_ttl_secs",
     "member_dwell_secs",
     "history_objects",
+    "history_credentials_file",
     "history_index_root",
     "release_poll_every_secs",
     "release_poll_repo",

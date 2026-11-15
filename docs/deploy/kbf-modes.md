@@ -879,6 +879,10 @@ The cold store is the durable home of every blob: a `file://` directory on one h
 - **A fallback.** A node that has a key pair of its own (the file, or `AWS_ACCESS_KEY_ID` and
   `AWS_SECRET_ACCESS_KEY`) gives up on the frontend after four tries and starts on those. A node without them
   waits for the frontend, as it waits for the registration.
+- **History's own key pair.** `--history-credentials-file PATH` (`history-credentials-file` in
+  `[history]` of `kbf.toml`) names a file of the same form and rules as `--cold-store-credentials-file`
+  for an `s3://` `--history-objects`, so a Docker Swarm secret can feed it. Given, the `AWS_*` variables
+  are not read and a bad file is refused at start; left out, they are read as before.
 - **Who never holds a key.** A daemon holds no store and no credential. A frontend serves no
   blob itself. In `all-in-one` the cold store is a directory in the units, so there is no key.
 

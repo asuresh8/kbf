@@ -105,6 +105,10 @@ impl Plane for StoredPlane {
         Some(self.stored.packs())
     }
 
+    fn writes_large_object_itself(&self) -> bool {
+        true
+    }
+
     fn action_result<'a>(
         &'a self,
         action: &'a Digest,

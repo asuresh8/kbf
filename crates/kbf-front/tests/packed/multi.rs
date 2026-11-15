@@ -277,6 +277,18 @@ impl Multi {
         }
     }
 
+    /// This farm with the backend of a frontend that has no storage node: its CAS write of a
+    /// large blob is the write of `cas/l/<sha256>` in the packs' object store.
+    pub(crate) fn without_storage_node(mut self) -> Self {
+        use kbf_pack_index::memory::MemoryPackIndex;
+        let actions = Arc::new(MemoryPackIndex::new(Arc::new(
+            kbf_state::ManualClock::default(),
+        )));
+        let stored = kbf_front::Stored::over(self.rig.packs.clone(), actions);
+        self.backend = Backend::stored(Arc::new(stored));
+        self
+    }
+
     /// The manifest of an honest run of `packs` packs whose large objects are `huge` (slot and
     /// digest), each named by an output file of its own.
     pub(crate) fn manifest(&self, packs: u8, huge: &[(u8, Digest)]) -> TaskManifest {

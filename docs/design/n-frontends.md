@@ -387,7 +387,7 @@ Swarm secrets are files (this is the second point of #1746). PR 2 adds `--histor
 read), a flag, not an environment variable (S2). With an `s3://` history there is no `LOCK`: the slot's history directory and its
 bind go away.
 
-The NUC's proxy is the gateway of `docker_gwbridge` (172.18.0.1:9300, as the owner's note gives it; komira-internal names it by the
+The NUC's proxy is the gateway of `docker_gwbridge` (port 9300 on that bridge; komira-internal names it by the
 `docker network inspect docker_gwbridge` command). A key of its own for `history/` keeps the history away from the farm's full key
 that the pack store uses today; that is komira-internal's change.
 

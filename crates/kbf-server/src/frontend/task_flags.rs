@@ -343,16 +343,17 @@ pub(super) fn args() -> [Arg; 20] {
             .long("task-out-format")
             .value_name("FORMAT")
             .value_parser([PACKS, ONE_PASS])
-            .default_value(PACKS)
+            .default_value(ONE_PASS)
             .help(
-                "With `--task-out-mode put-dir`: what the task writes. `packs`: packs and \
-                 large objects planned from the digests, as every release before the one-pass \
-                 object does. `one-pass`: one object per action, written while the outputs \
-                 are read, its manifest and index at the end \
-                 (docs/design/one-pass-task-object.md). This frontend reads both; set \
-                 `one-pass` only once every frontend and every task image is this release \
-                 or later, since a task image that does not know it is refused its flag. \
-                 Refused with `--task-out-mode presigned`",
+                "With `--task-out-mode put-dir`: what the task writes. `one-pass`, the \
+                 default: one object per action, written while the outputs are read, its \
+                 manifest and index at the end (docs/design/one-pass-task-object.md). \
+                 `packs`: packs and large objects planned from the digests, as every release \
+                 before the one-pass object does; deprecated, and removed in a later release. \
+                 This frontend reads both. A task image of a release before the one-pass \
+                 object refuses the flag this sends, so every frontend and every task image \
+                 must be this release or later, or set `packs`. Ignored with `--task-out-mode \
+                 presigned`, which writes no put directory",
             ),
     ]
 }
@@ -610,11 +611,6 @@ fn out_of(m: &ArgMatches) -> Result<TaskOut, String> {
         Some(root) if put_dir => PutDirRoots::new(root)
             .map(|roots| TaskOut::PutDir(roots.with_format(format_of(m))))
             .map_err(|error| format!("--task-out-root: {error}")),
-        None if format_of(m) == OutFormat::OnePass => Err(
-            "--task-out-format one-pass is only for --task-out-mode put-dir: drop it, or give \
-             the mode"
-                .to_owned(),
-        ),
         Some(_) => Err(
             "--task-out-root is only for --task-out-mode put-dir: drop it, or give the mode"
                 .to_owned(),
@@ -635,8 +631,8 @@ fn entries_of(m: &ArgMatches) -> usize {
 /// What `--task-out-format` says.
 fn format_of(m: &ArgMatches) -> OutFormat {
     match m.get_one::<String>(OUT_FORMAT).map(String::as_str) {
-        Some(ONE_PASS) => OutFormat::OnePass,
-        _ => OutFormat::Packs,
+        Some(PACKS) => OutFormat::Packs,
+        _ => OutFormat::OnePass,
     }
 }
 

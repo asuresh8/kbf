@@ -91,6 +91,8 @@ executor-locate = false
 executor-max-run-secs = 3000
 # The network every job is given on its host. `allow-list`, the default, is the endpoints the host's agent is set up to allow and nothing else: the task reaches the read listener and the pack store only once each agent allows them, and a host whose agent cannot check those limits refuses the job (`egress-unchecked`), which the farm runs again. `none` is no route out: every action fails, as the task can reach neither. `open` is any address but those the agent always denies, and needs `--executor-allow-open-network`. Used only with `--executor js-agent`
 executor-network = "allow-list"
+# How often the executor polls the job service for its jobs, in milliseconds: 100 to 10000. Together with the fence time it must stay under the scheduler's re-dispatch grace, which is checked at start. Used only with `--executor js-agent`
+executor-poll-ms = 1000
 # How long the inputs of one run (its action, its input tree published into the store, its keys) may take to prepare, in seconds. The `Start`'s own window ends only the submit, not the preparation, which goes on until this limit so the tree it publishes is there for the run the farm starts next. Used only with `--executor js-agent`
 executor-prepare-limit-secs = 300
 # What a job's wall limit adds to the action's timeout, in seconds: the fetch of the inputs and the upload of the pack. An action that fetches or uploads for longer than this ends at the wall limit and is answered to the caller as a timeout. Used only with `--executor js-agent`

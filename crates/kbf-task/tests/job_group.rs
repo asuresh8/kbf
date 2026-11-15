@@ -27,3 +27,17 @@ fn a_process_left_in_the_group_is_killed_when_the_run_returns() {
     let file = std::fs::File::open(dir.join("lock")).expect("lock");
     rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).expect("flock");
 }
+
+/// The same when the run ends at its deadline: the Command (`hold`, which waits for ever) is
+/// killed with its group and the run says so. With a deadline of zero it may be killed before it
+/// took its lock, which leaves nothing to wait for.
+#[test]
+fn a_command_still_running_at_the_deadline_is_killed_with_its_group() {
+    let dir = scratch("group-deadline");
+    let ran = run_probe(&dir, "hold", Job::Group, Duration::ZERO);
+    let _left = Leftover(&dir.join("pid"));
+    assert!(ran.timed_out);
+    if let Ok(file) = std::fs::File::open(dir.join("lock")) {
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).expect("flock");
+    }
+}

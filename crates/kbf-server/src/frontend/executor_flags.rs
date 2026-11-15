@@ -75,6 +75,7 @@ const FAILED_STDERR_LOG: &str = "executor_failed_stderr_log_bytes";
 const MAX_RUN: &str = "executor_max_run_secs";
 const DEFAULT_TIMEOUT: &str = "executor_default_timeout_secs";
 const CALL_TIMEOUT: &str = "executor_call_timeout_secs";
+const POLL: &str = "executor_poll_ms";
 const PREPARE_LIMIT: &str = "executor_prepare_limit_secs";
 const NETWORK: &str = "executor_network";
 const OPEN_NETWORK: &str = "executor_allow_open_network";
@@ -418,6 +419,17 @@ pub(super) fn args() -> Vec<Arg> {
              seconds. Under the fence time. Used only with `--executor js-agent`",
             "5",
         ),
+        Arg::new(POLL)
+            .long("executor-poll-ms")
+            .value_name("MILLISECONDS")
+            .value_parser(clap::value_parser!(u64).range(100..=10_000))
+            .default_value("1000")
+            .help(
+                "How often the executor polls the job service for its jobs, in milliseconds: \
+                 100 to 10000. Together with the fence time it must stay under the scheduler's \
+                 re-dispatch grace, which is checked at start. Used only with `--executor \
+                 js-agent`",
+            ),
         number(
             PREPARE_LIMIT,
             "executor-prepare-limit-secs",
@@ -636,6 +648,7 @@ fn js_agent_flags(m: &ArgMatches) -> Result<JsAgentFlags, String> {
     config.max_run = secs(MAX_RUN);
     config.default_timeout = secs(DEFAULT_TIMEOUT);
     config.call_timeout = secs(CALL_TIMEOUT);
+    config.poll = Duration::from_millis(count(POLL));
     config.prepare_limit = secs(PREPARE_LIMIT);
     config.network = network(m);
     config.allow_open_network = m.get_flag(OPEN_NETWORK);

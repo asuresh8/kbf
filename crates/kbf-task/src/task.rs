@@ -514,6 +514,16 @@ pub(crate) async fn complete(
     Ok(manifest)
 }
 
+/// How the Command is run: in a tree job, which runs in a job that is its sandbox, directly
+/// ([`Job`]: its group is ended, and with `Cli::subreaper` every process it left); else in the sandbox.
+pub(crate) fn job_of(cli: &Cli) -> Option<Job> {
+    cli.tree.is_some().then_some(if cli.subreaper {
+        Job::Subreaper
+    } else {
+        Job::Group
+    })
+}
+
 /// Runs the Command and collects its outputs, within what `limits` can store: the manifest
 /// (`pack_ms` the time the outputs took to collect, one pack and no large object yet) and the
 /// blobs, for a sink to place and store.
@@ -548,12 +558,7 @@ pub(crate) async fn collected(
             unreadable: &unreadable,
             hidden: &hidden,
             relay: cli.relay.as_deref(),
-            // A tree job runs in a job, which is its sandbox: the Command is started directly.
-            job: cli.tree.is_some().then_some(if cli.subreaper {
-                Job::Subreaper
-            } else {
-                Job::Group
-            }),
+            job: job_of(cli),
         },
     )
     .await?;

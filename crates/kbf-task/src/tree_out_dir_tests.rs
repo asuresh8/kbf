@@ -336,9 +336,19 @@ fn the_object_format_flag_needs_the_put_directory() {
 async fn a_directory_of_equal_files_is_one_entry_per_blob_and_dead_bytes_for_a_repeated_large_one()
 {
     let dir = scratch("one-pass-dir");
-    let script = "mkdir d && head -c 3145728 /dev/zero > d/big && cp d/big d/copy && echo a > d/a && cp d/a d/b";
-    let command = command(&["sh", "-c", script], "", &["d"]);
+    let command = command(&["cp", "-R", "src", "d"], "", &["d"]);
     let digest = lay_out(&dir, &action_of(&command), &command);
+    // The Command copies this directory: two equal large files and two equal small ones.
+    std::fs::create_dir(dir.join("work/src")).expect("src");
+    for (name, bytes) in [
+        ("big", vec![0u8; 3_145_728]),
+        ("copy", vec![0u8; 3_145_728]),
+    ] {
+        std::fs::write(dir.join("work/src").join(name), bytes).expect("large");
+    }
+    for name in ["a", "b"] {
+        std::fs::write(dir.join("work/src").join(name), b"a\n").expect("small");
+    }
     let out = put_dir(&dir);
     assert_eq!(
         main_with(&one_pass_cli(&dir, &digest, &out)).await,
@@ -414,8 +424,18 @@ async fn a_one_pass_object_that_cannot_be_written_or_committed_is_exit_13_and_le
     }
     for what in ["create", "write", "commit"] {
         let dir = scratch(&format!("one-pass-fail-{what}"));
-        let script = "head -c 2097152 /dev/zero > big";
-        let command = command(&["sh", "-c", script], "", &["big"]);
+        let command = command(
+            &[
+                "dd",
+                "if=/dev/zero",
+                "of=big",
+                "bs=1048576",
+                "count=2",
+                "status=none",
+            ],
+            "",
+            &["big"],
+        );
         let digest = lay_out(&dir, &action_of(&command), &command);
         let out = put_dir(&dir);
         let mut sink = OutDir::open(&out).expect("open");

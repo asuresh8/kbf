@@ -4,6 +4,7 @@ use kbf_proto::reapi::Digest;
 use kbf_types::LeaseId;
 
 use super::{Delivery, PackKey, Secret, TaskArgs, build_id, put_dir_argv};
+use crate::executor::OutFormat;
 
 fn args<'a>(action: &'a Digest, grant: &'a Secret, url: &'a Secret, plain: bool) -> TaskArgs<'a> {
     TaskArgs {
@@ -338,7 +339,12 @@ fn argv_delivery_is_unchanged() {
 /// nothing that names a url, a grant or a secret.
 #[test]
 fn a_put_dir_run_is_told_the_tree_and_out_and_no_secret() {
-    let argv = put_dir_argv(&digest(), LeaseId::new(7, 3), Duration::from_secs(90));
+    let argv = put_dir_argv(
+        &digest(),
+        LeaseId::new(7, 3),
+        Duration::from_secs(90),
+        OutFormat::Packs,
+    );
     let want = [
         "--tree",
         "--stage-and-commit",
@@ -357,4 +363,13 @@ fn a_put_dir_run_is_told_the_tree_and_out_and_no_secret() {
             .iter()
             .any(|arg| arg.contains("url") || arg.contains("grant"))
     );
+    // One-pass adds the format and nothing else.
+    let one = put_dir_argv(
+        &digest(),
+        LeaseId::new(7, 3),
+        Duration::from_secs(90),
+        OutFormat::OnePass,
+    );
+    assert_eq!(one[..want.len()], want[..]);
+    assert_eq!(one[want.len()..], ["--object-format", "one-pass"]);
 }

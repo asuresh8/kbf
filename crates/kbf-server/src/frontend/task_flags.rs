@@ -49,7 +49,7 @@ use kbf_front::prepare_run::{
 use kbf_front::{Backend, MintError, PackKeyMint};
 use zeroize::Zeroizing;
 
-use crate::executor::{PutDirRoots, TaskOut};
+use crate::executor::{OutFormat, PutDirRoots, TaskOut};
 use crate::token::{TokenFileError, read_owner_only};
 
 const SECRET: &str = "task_secret_file";
@@ -68,7 +68,10 @@ const LARGE_CREDENTIALS: &str = "task_large_credentials_file";
 const LARGE_MAX_BYTES: &str = "task_large_max_bytes";
 const OUT_MODE: &str = "task_out_mode";
 const OUT_ROOT: &str = "task_out_root";
+const OUT_FORMAT: &str = "task_out_format";
+const ONE_PASS: &str = "one-pass";
 const PRESIGNED: &str = "presigned";
+const PACKS: &str = "packs";
 const PUT_DIR: &str = "put-dir";
 const PUT_FLAG: &str = "--task-put-credentials-file";
 const LARGE_FLAG: &str = "--task-large-credentials-file";
@@ -100,8 +103,8 @@ const MAX_SECS: u64 = kbf_front::prepare_run::MAX_EXPIRY.as_secs();
 /// The most bytes a secret file or a credentials file may hold.
 const MAX_FILE_BYTES: usize = 4096;
 
-/// The sixteen flags.
-pub(super) fn args() -> [Arg; 16] {
+/// The seventeen flags.
+pub(super) fn args() -> [Arg; 17] {
     [
         Arg::new(SECRET)
             .long("task-secret-file")
@@ -297,6 +300,21 @@ pub(super) fn args() -> [Arg; 16] {
                  mount root; each run's directory is `<mp>/put/cas/b/<lease>/<nonce>`, and its \
                  action tree `<mp>/trees/<digest>`",
             ),
+        Arg::new(OUT_FORMAT)
+            .long("task-out-format")
+            .value_name("FORMAT")
+            .value_parser([PACKS, ONE_PASS])
+            .default_value(PACKS)
+            .help(
+                "With `--task-out-mode put-dir`: what the task writes. `packs`: packs and \
+                 large objects planned from the digests, as every release before the one-pass \
+                 object does. `one-pass`: one object per action, written while the outputs \
+                 are read, its manifest and index at the end \
+                 (docs/design/one-pass-task-object.md). This frontend reads both; set \
+                 `one-pass` only once every frontend and every task image is this release \
+                 or later, since a task image that does not know it is refused its flag. \
+                 Refused with `--task-out-mode presigned`",
+            ),
     ]
 }
 
@@ -475,7 +493,9 @@ pub(super) fn put_dir_from_matches(m: &ArgMatches) -> Result<Option<PutDirFlags>
     let digests = m.get_one::<u32>(MAX_DIGESTS).copied().unwrap_or_default();
     Ok(Some(PutDirFlags {
         secret_file: secret_file.clone(),
-        roots: PutDirRoots::new(root).map_err(|error| format!("--task-out-root: {error}"))?,
+        roots: PutDirRoots::new(root)
+            .map(|roots| roots.with_format(format_of(m)))
+            .map_err(|error| format!("--task-out-root: {error}"))?,
         url_slack: Duration::from_secs(m.get_one::<u64>(URL_SLACK).copied().unwrap_or_default()),
         max_digests: usize::try_from(digests).unwrap_or(usize::MAX),
         max_bytes: m.get_one::<u64>(MAX_BYTES).copied().unwrap_or_default(),
@@ -519,13 +539,26 @@ fn out_of(m: &ArgMatches) -> Result<TaskOut, String> {
     // clap gives `put-dir` its root (`requires_if`): with no root the mode is `presigned`.
     match root {
         Some(root) if put_dir => PutDirRoots::new(root)
-            .map(TaskOut::PutDir)
+            .map(|roots| TaskOut::PutDir(roots.with_format(format_of(m))))
             .map_err(|error| format!("--task-out-root: {error}")),
+        None if format_of(m) == OutFormat::OnePass => Err(
+            "--task-out-format one-pass is only for --task-out-mode put-dir: drop it, or give \
+             the mode"
+                .to_owned(),
+        ),
         Some(_) => Err(
             "--task-out-root is only for --task-out-mode put-dir: drop it, or give the mode"
                 .to_owned(),
         ),
         None => Ok(TaskOut::Presigned),
+    }
+}
+
+/// What `--task-out-format` says.
+fn format_of(m: &ArgMatches) -> OutFormat {
+    match m.get_one::<String>(OUT_FORMAT).map(String::as_str) {
+        Some(ONE_PASS) => OutFormat::OnePass,
+        _ => OutFormat::Packs,
     }
 }
 

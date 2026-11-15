@@ -556,6 +556,63 @@ fn the_output_mode_is_presigned_or_a_put_dir_under_its_root() {
     );
 }
 
+/// Asserts `--task-out-format`: `packs` by default and when given, `one-pass` reaching the roots
+/// of the put-directory setting both ways the flags make it (with the presigned flags and
+/// without), a value that is neither refused, and `one-pass` with the presigned mode refused
+/// rather than ignored.
+#[test]
+fn the_out_format_is_packs_unless_one_pass_is_asked_for() {
+    let put_dir = |more: &[&str]| {
+        let mut flags = PUT_DIR_ONLY.to_vec();
+        flags.extend_from_slice(more);
+        parsed(&flags)
+            .expect("parses")
+            .put_dir
+            .expect("put-dir")
+            .roots
+    };
+    assert_eq!(put_dir(&[]).format(), OutFormat::Packs);
+    assert_eq!(
+        put_dir(&["--task-out-format=packs"]).format(),
+        OutFormat::Packs
+    );
+    assert_eq!(
+        put_dir(&["--task-out-format=one-pass"]).format(),
+        OutFormat::OnePass
+    );
+
+    let task = |more: &[&str]| {
+        let mut flags = TASK.to_vec();
+        flags.extend_from_slice(&["--task-out-mode=put-dir", "--task-out-root=/mnt/ts/put"]);
+        flags.extend_from_slice(more);
+        match parsed(&flags)
+            .expect("parses")
+            .task
+            .expect("task flags")
+            .out
+        {
+            TaskOut::PutDir(roots) => roots.format(),
+            TaskOut::Presigned => panic!("a put directory was asked for"),
+        }
+    };
+    assert_eq!(task(&[]), OutFormat::Packs);
+    assert_eq!(task(&["--task-out-format=one-pass"]), OutFormat::OnePass);
+
+    let mut flags = TASK.to_vec();
+    flags.push("--task-out-format=tar");
+    assert_eq!(
+        parsed(&flags).expect_err("refused").kind(),
+        ErrorKind::InvalidValue
+    );
+    let mut flags = TASK.to_vec();
+    flags.push("--task-out-format=one-pass");
+    let refusal = parsed(&flags).expect_err("refused").to_string();
+    assert!(
+        refusal.contains("--task-out-format one-pass is only for"),
+        "{refusal}"
+    );
+}
+
 /// The two flags a put-directory frontend is given.
 const PUT_DIR_ONLY: [&str; 3] = [
     "--task-secret-file=/etc/kbf/task.secret",

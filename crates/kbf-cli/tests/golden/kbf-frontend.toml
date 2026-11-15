@@ -347,6 +347,8 @@ task-large-max-bytes = 536870912
 task-max-large = 8
 # The pack keys each run of presigned writes gets, 1 to 8 (`cas/b/<lease>/<nonce>-<k>`): a ceiling, not a prediction, since the sizes of a run's outputs are not known before it runs; a key a task does not write is never used. Used only with `--task-secret-file`
 task-max-packs = 8
+# With `--task-out-mode put-dir`: what the task writes. `packs`: packs and large objects planned from the digests, as every release before the one-pass object does. `one-pass`: one object per action, written while the outputs are read, its manifest and index at the end (docs/design/one-pass-task-object.md). This frontend reads both; set `one-pass` only once every frontend and every task image is this release or later, since a task image that does not know it is refused its flag. Refused with `--task-out-mode presigned`
+task-out-format = "packs"
 # Where a task's outputs go. `presigned`: a presigned write of each pack and large object to the tier store, the inputs read through a read grant. `put-dir`: the task commits them as files into a put directory under `--task-out-root`, mounted at /out, which the host's tier store uploads; the inputs are the action tree under the trees directory beside it, the job's root, and the job has no network; no tier store write endpoint, bucket, credentials or read url is needed. Used only with `--task-secret-file` and `--executor js-agent`
 task-out-mode = "presigned"
 # With `--task-out-mode put-dir`: the tier store's put directory on every host (`<mp>/put`, an absolute path), which the host's agent lists as a read-write mount root; each run's directory is `<mp>/put/cas/b/<lease>/<nonce>`, and its action tree `<mp>/trees/<digest>`

@@ -46,6 +46,7 @@ use crate::proxy::packed::metrics::Reason;
 mod large;
 mod metadata;
 mod mint;
+mod one_pass;
 mod put_dir;
 mod set;
 mod task;
@@ -75,6 +76,11 @@ pub const MAX_UNTRUSTED_READ_BYTES: u64 = MAX_UNTRUSTED_PACK_BYTES + TRAILER_LEN
 /// The most bytes one large object of a task may have by default (`--task-large-max-bytes`): 512
 /// MiB, which the object store's own cap for the large-object key must equal.
 pub const MAX_UNTRUSTED_LARGE_BYTES: u64 = 512 << 20;
+
+/// The most records a one-pass object of a put directory may index, by default: an index of at
+/// most 52 MiB is read for it. A one-pass object has no cap of its own on its length or on the
+/// size of a blob; this bounds what the frontend reads before it trusts the index.
+pub const MAX_UNTRUSTED_OBJECT_ENTRIES: usize = 1 << 20;
 
 /// The key the frontend issued for one build's write of one pack: `cas/b/<build>/<nonce>`.
 ///
@@ -212,6 +218,9 @@ pub struct UntrustedLimits {
     /// The most bytes of one large object of a run ([`MAX_UNTRUSTED_LARGE_BYTES`]): a manifest
     /// that names a larger one is refused as a bad manifest. 0 refuses every large object.
     pub max_large_bytes: u64,
+    /// The most records of a one-pass object (`kbf_pack::one_pass`) of a put directory; a larger
+    /// index is refused as too large before it is read. Unused by the other ingests.
+    pub max_object_entries: usize,
 }
 
 impl Default for UntrustedLimits {
@@ -222,6 +231,7 @@ impl Default for UntrustedLimits {
             max_blob_bytes: MAX_UNTRUSTED_BLOB_BYTES,
             read_budget: MAX_UNTRUSTED_READ_BYTES,
             max_large_bytes: MAX_UNTRUSTED_LARGE_BYTES,
+            max_object_entries: MAX_UNTRUSTED_OBJECT_ENTRIES,
         }
     }
 }

@@ -6,6 +6,10 @@
 //! sections 2 and 3). The ingest is [`super::ingest_set`]'s over every key the directory can hold
 //! (`pack` to `pack7`, `L0` to `L7`), with a lighter proof ([`Proof::Manifest`]):
 //!
+//! - **One object.** When pack 0 ends in the trailer of a one-pass object (a task told to write
+//!   `--object-format one-pass`), the run is one object with no other pack and no large object, and
+//!   [`super::one_pass`] ingests it: the trailer, then the manifest and the index in one range, no
+//!   record, one row in the pack index for every record. The steps below are those of the packs.
 //! - **What it reads.** Pack 0's length, trailer, footer and record 0 (the manifest, checked
 //!   against its CRC-32C and SHA-256), the footer of each other pack the manifest names, and the
 //!   length of each large object. No other record of a pack is read: neither the output trees

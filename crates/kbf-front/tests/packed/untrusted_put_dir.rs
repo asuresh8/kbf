@@ -572,3 +572,338 @@ async fn an_index_that_fails_the_record_leaves_the_run_unavailable() {
     };
     assert_eq!(farm.run().await, want);
 }
+
+// ---- the one-pass object ----
+
+use kbf_pack::one_pass::ObjectWriter;
+
+/// A one-pass object of `manifest` and `records`, each written whole.
+fn one_pass_of(manifest: &TaskManifest, records: &[&[u8]]) -> Vec<u8> {
+    one_pass_json(
+        &manifest.to_json_with(512 << 20).expect("a manifest"),
+        records,
+    )
+}
+
+/// A one-pass object whose manifest record is `json`, as it is.
+fn one_pass_json(json: &[u8], records: &[&[u8]]) -> Vec<u8> {
+    let mut writer = ObjectWriter::new(Vec::new());
+    for record in records {
+        writer.blob(&sha256(record), record).expect("written");
+    }
+    writer.finish(json).expect("finished").0
+}
+
+impl PutDir {
+    /// The manifest of an honest run of one object: `multi`'s outputs, in one pack.
+    fn one_object_manifest(&self) -> TaskManifest {
+        self.manifest(1, &[])
+    }
+
+    /// The records of an honest run.
+    fn records(&self) -> [&[u8]; 5] {
+        let p = &self.p;
+        [&p.alpha, &p.beta, &p.stdout, &p.tree.1, &p.in_dir]
+    }
+
+    /// Ingests with `limits`.
+    async fn run_with(&self, limits: &UntrustedLimits) -> Ingested {
+        let (packs, backend, mint) = (&self.rig.packs, &self.backend, &self.mint);
+        ingest_put_dir(packs, backend, mint, LEASE, &self.dir, &self.action, limits).await
+    }
+}
+
+/// Asserts that a one-pass object is ingested into the result its manifest describes and cached;
+/// that its one object is recorded, written by `b/<lease>`, with a row for every record; and that
+/// the ingest read the trailer, then the manifest and the index in one range, and no record (but
+/// the output tree, which the action cache's record of the result reads).
+#[tokio::test]
+async fn a_one_pass_object_is_ingested_from_its_trailer_manifest_and_index() {
+    let farm = PutDir::new().await;
+    let manifest = farm.one_object_manifest();
+    let object = one_pass_of(&manifest, &farm.records());
+    farm.put(Slot::Pack(0), &object).await;
+
+    let got = farm.run().await;
+
+    let want = Ingested::Ran {
+        result: Box::new(result_of(&manifest)),
+        cached: true,
+    };
+    assert_eq!(got, want);
+    assert!(farm.rig.index.has_all(&farm.p.digests()));
+    let info = farm
+        .rig
+        .index
+        .pack(&farm.key(Slot::Pack(0)))
+        .expect("asked");
+    assert_eq!(info.expect("recorded").writer, format!("b/{LEASE}"));
+    let p = &farm.p;
+    let records_len: u64 = farm.records().iter().map(|r| r.len() as u64).sum();
+    let tree_at = object
+        .windows(p.tree.1.len())
+        .position(|window| window == &p.tree.1[..])
+        .expect("the tree is in the object") as u64;
+    let ranges = farm.rig.store.ranges();
+    assert_eq!(
+        ranges[0],
+        (farm.key(Slot::Pack(0)), object.len() as u64 - 64, 64)
+    );
+    assert_eq!(
+        ranges[1],
+        (
+            farm.key(Slot::Pack(0)),
+            records_len,
+            object.len() as u64 - records_len
+        )
+    );
+    for (key, offset, len) in &ranges[2..] {
+        if *key == farm.key(Slot::Pack(0)) {
+            assert_eq!((*offset, *len), (tree_at, p.tree.1.len() as u64));
+        }
+    }
+    let metrics = farm.rig.packs.metrics();
+    assert_eq!(metrics.ingests(), 1);
+    assert_eq!(metrics.ingest_put_dirs(), 1);
+    assert_eq!(metrics.ingest_packs(), 1);
+    assert_eq!(metrics.put_dir_records(), 1);
+}
+
+/// Asserts the rollout rule (docs/design/one-pass-task-object.md section 6): one frontend ingests
+/// the packs of the format before and the one-pass object of this one, each into the same result.
+#[tokio::test]
+async fn one_pass_and_packs_ingest_side_by_side() {
+    let old = PutDir::new().await;
+    let (manifest, zero, one) = old.two_packs();
+    old.put(Slot::Pack(0), &zero).await;
+    old.put(Slot::Pack(1), &one).await;
+    let new = PutDir::new().await;
+    new.put(
+        Slot::Pack(0),
+        &one_pass_of(&new.one_object_manifest(), &new.records()),
+    )
+    .await;
+
+    let (before, after) = (old.run().await, new.run().await);
+
+    assert_eq!(before, after);
+    assert_eq!(
+        before,
+        Ingested::Ran {
+            result: Box::new(result_of(&manifest)),
+            cached: true,
+        }
+    );
+}
+
+/// Asserts that a one-pass object has no length cap of the packs' (`max_pack_bytes`), while the
+/// pack of the format before still has one.
+#[tokio::test]
+async fn a_one_pass_object_has_no_length_cap_and_a_pack_still_has() {
+    let limits = UntrustedLimits {
+        max_pack_bytes: 1,
+        ..UntrustedLimits::default()
+    };
+    let farm = PutDir::new().await;
+    farm.put(
+        Slot::Pack(0),
+        &one_pass_of(&farm.one_object_manifest(), &farm.records()),
+    )
+    .await;
+    assert!(matches!(farm.run_with(&limits).await, Ingested::Ran { .. }));
+
+    let farm = PutDir::new().await;
+    let (_, zero, one) = farm.two_packs();
+    farm.put(Slot::Pack(0), &zero).await;
+    farm.put(Slot::Pack(1), &one).await;
+    let got = farm.run_with(&limits).await;
+    farm.refused(got, RejectReason::TooLarge);
+}
+
+/// Asserts that a blob over the record cap is an entry of the one object: its row is recorded
+/// where it lies (not at offset 0, after other records), the node is given it by a ranged read
+/// of the object, and its bytes are counted as a large object's are.
+#[tokio::test]
+async fn a_large_blob_is_an_entry_of_the_object_and_is_read_by_range() {
+    let farm = PutDir::new().await;
+    let mut manifest = farm.one_object_manifest();
+    manifest.output_files.push(kbf_pack::OutputFile {
+        path: "out/big0".to_owned(),
+        digest: large().1,
+        is_executable: false,
+    });
+    let mut records: Vec<&[u8]> = farm.records().to_vec();
+    records.push(&large().0);
+    farm.put(Slot::Pack(0), &one_pass_of(&manifest, &records))
+        .await;
+
+    let got = farm.run().await;
+
+    let want = Ingested::Ran {
+        result: Box::new(result_of(&manifest)),
+        cached: true,
+    };
+    assert_eq!(got, want);
+    let row = farm.rig.index.where_is(&[large().1]);
+    let row = row[0].as_ref().expect("the large blob has a row");
+    assert_eq!(row.pack_key, farm.key(Slot::Pack(0)));
+    assert!(row.offset > 0);
+    assert!(farm.rig.node_holds(&large().1).await);
+    assert_eq!(
+        farm.rig.packs.metrics().ingest_large_bytes(),
+        large().0.len() as u64
+    );
+    let past = farm.rig.store.ranges();
+    assert!(
+        past.iter()
+            .any(|(key, offset, _)| *key == farm.key(Slot::Pack(0)) && *offset >= row.offset),
+        "{past:?}"
+    );
+}
+
+/// Asserts that bytes of a duplicate that sit between two records (a gap no entry names) are
+/// accepted, and the object is ingested as the object without them is.
+#[tokio::test]
+async fn dead_bytes_between_records_are_accepted() {
+    let farm = PutDir::new().await;
+    let manifest = farm.one_object_manifest();
+    let mut writer = ObjectWriter::new(Vec::new());
+    for record in farm.records() {
+        let mut at = writer.begin();
+        writer.chunk(&mut at, record).expect("chunk");
+        writer.end(at, &sha256(record)).expect("ended");
+        // The same bytes again: written, not indexed.
+        let mut again = writer.begin();
+        writer.chunk(&mut again, record).expect("chunk");
+        writer.end(again, &sha256(record)).expect("ended");
+    }
+    let object = writer
+        .finish(&manifest.to_json().expect("json"))
+        .expect("done")
+        .0;
+    farm.put(Slot::Pack(0), &object).await;
+
+    let got = farm.run().await;
+
+    assert!(matches!(got, Ingested::Ran { .. }), "{got:?}");
+    assert!(farm.rig.index.has_all(&farm.p.digests()));
+}
+
+/// Asserts the refusals of a one-pass object's own rules, each before any record is read and
+/// with nothing indexed: a damaged index, a damaged trailer, an index past the entry limit, a
+/// manifest past the cap.
+#[tokio::test]
+async fn a_damaged_or_oversize_one_pass_object_is_refused_unread() {
+    let farm = PutDir::new().await;
+    let manifest = farm.one_object_manifest();
+    let honest = one_pass_of(&manifest, &farm.records());
+    let records_len: usize = farm.records().iter().map(|r| r.len()).sum();
+    let json_len = manifest.to_json().expect("json").len();
+
+    let mut index = honest.clone();
+    index[records_len + json_len] ^= 1;
+    let mut trailer = honest.clone();
+    let at = trailer.len() - 30;
+    trailer[at] ^= 1;
+    for (what, bytes) in [("index", index), ("trailer", trailer)] {
+        let farm = PutDir::new().await;
+        farm.put(Slot::Pack(0), &bytes).await;
+        let got = farm.run().await;
+        farm.refused(got, RejectReason::Malformed);
+        let _ = what;
+    }
+
+    let farm = PutDir::new().await;
+    farm.put(Slot::Pack(0), &honest).await;
+    let few = UntrustedLimits {
+        max_object_entries: 4,
+        ..UntrustedLimits::default()
+    };
+    let got = farm.run_with(&few).await;
+    farm.refused(got, RejectReason::TooLarge);
+
+    let farm = PutDir::new().await;
+    let mut writer = ObjectWriter::new(Vec::new());
+    writer
+        .blob(&sha256(&farm.p.beta), &farm.p.beta)
+        .expect("written");
+    let big = writer.finish(&vec![b' '; (4 << 20) + 1]).expect("done").0;
+    farm.put(Slot::Pack(0), &big).await;
+    let got = farm.run().await;
+    farm.refused(got, RejectReason::TooLarge);
+}
+
+/// Asserts the manifest's own rules for a one-pass object: another lease is `WrongKey`; more
+/// than one pack, or a large entry, is `BadManifest`; a digest it names that no record holds is
+/// `Incomplete`; and an output the Command does not declare is `BadManifest`.
+#[tokio::test]
+async fn a_one_pass_manifest_is_held_to_its_lease_its_one_object_and_its_records() {
+    let honest = PutDir::new().await;
+    let base = honest.one_object_manifest();
+    let mut other_lease = base.clone();
+    other_lease.lease = "00000000000000010000000000000003".to_owned();
+    // A manifest of version 2 that says two packs, which the writer's own rules would not write.
+    let mut stats = base.clone();
+    stats.inputs = Some(kbf_pack::InputStats {
+        from: Some(kbf_pack::InputsFrom::Tree),
+        ..kbf_pack::InputStats::default()
+    });
+    let json = stats.to_json().expect("json");
+    let text = String::from_utf8(json).expect("utf-8");
+    assert!(text.contains("\"packs\":1"));
+    let two_packs = text.replace("\"packs\":1", "\"packs\":2").into_bytes();
+    let with_large = honest.manifest(1, &[(0, large().1)]);
+    let records = honest.records();
+    let cases = [
+        (one_pass_of(&other_lease, &records), RejectReason::WrongKey),
+        (
+            one_pass_json(&two_packs, &records),
+            RejectReason::BadManifest,
+        ),
+        (
+            one_pass_of(&with_large, &records),
+            RejectReason::BadManifest,
+        ),
+    ];
+    for (object, reason) in cases {
+        let farm = PutDir::new().await;
+        farm.put(Slot::Pack(0), &object).await;
+        let got = farm.run().await;
+        farm.refused(got, reason);
+    }
+
+    // `beta` is named and no record holds it.
+    let farm = PutDir::new().await;
+    let p = &farm.p;
+    let records: [&[u8]; 4] = [&p.alpha, &p.stdout, &p.tree.1, &p.in_dir];
+    farm.put(Slot::Pack(0), &one_pass_of(&base, &records)).await;
+    let got = farm.run().await;
+    farm.refused(got, RejectReason::Incomplete);
+
+    // The Command does not declare `out/alpha`.
+    let declared: Vec<&str> = DECLARED
+        .iter()
+        .copied()
+        .filter(|p| *p != "out/alpha")
+        .collect();
+    let farm = PutDir::declaring(&declared, false).await;
+    let manifest = farm.one_object_manifest();
+    farm.put(Slot::Pack(0), &one_pass_of(&manifest, &farm.records()))
+        .await;
+    let got = farm.run().await;
+    farm.refused(got, RejectReason::BadManifest);
+}
+
+/// Asserts that a manifest that is not JSON, in an object whose CRCs are right, is `BadManifest`.
+#[tokio::test]
+async fn a_one_pass_manifest_that_is_not_a_manifest_is_bad() {
+    let farm = PutDir::new().await;
+    let mut writer = ObjectWriter::new(Vec::new());
+    writer
+        .blob(&sha256(&farm.p.beta), &farm.p.beta)
+        .expect("written");
+    let object = writer.finish(b"{not json").expect("done").0;
+    farm.put(Slot::Pack(0), &object).await;
+    let got = farm.run().await;
+    farm.refused(got, RejectReason::BadManifest);
+}

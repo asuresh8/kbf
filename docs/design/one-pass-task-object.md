@@ -237,24 +237,45 @@ Additive: a new object kind under the same key, a new flag, no field of any ship
 | A directory with more than `max_object_entries` entries | `TooLarge` before it is read |
 | The old frontend meets a one-pass object | `Malformed`; a configuration error caught by 6's order |
 
-## 8. Measured
+## 8. Results
 
-A Command writes `big` (170 MiB of random bytes) and `d/f0..f1999` (1,000 to 2,999 bytes each), outputs `big` and `d`, run
-through `kbf_task::tree::execute_out_dir` with a plain directory as the put directory, release build, one Linux host,
-page cache warm, three runs of each format (a throwaway harness, not committed). Bytes read are `rchar` of
-`/proc/self/io` around the call; it also counts the reaped Command's own reads (170 MiB of `/dev/urandom` and about 36 MiB
-for the shell and the 2,000 `head` runs), which are the same for both formats.
+Every number below says whether it was **measured** (read from the run) or **inferred** (computed from measured numbers or
+from the code).
 
-| | `--object-format` default (packs) | `one-pass` |
+**Setup (measured).** One Linux host (kernel 6.17), release build, page cache warm, no sandbox (the host refused the Command's
+namespace step: `sandbox: incomplete (setgroups 13)`, the same for both formats). A throwaway harness (not committed) ran
+`kbf_task::tree::execute_out_dir` with a plain directory as the put directory and a tree job whose Command wrote one 170 MiB
+file of random bytes (`big`) and 2,000 files `d/f0..f1999` of 1,000 to 2,999 random bytes, outputs `big` and `d`. Three rounds,
+the two formats alternating (packs first), each in a fresh tree. Bytes read are `rchar` of `/proc/self/io` read before and after
+the call. The task's wall time minus the Command's own wall time (`timing.run_ms`) is the task's overhead for the action: the
+input read, the collection, the write and the commit.
+
+| | packs (`--object-format` absent) | one-pass |
 |---|---|---|
-| bytes read (rchar, 3 runs identical) | 545.5 MiB | 375.6 MiB |
-| of which the outputs | 2 x 170 MiB + small files | 1 x 170 MiB + small files |
-| objects written | `pack` + `L0` (the 170 MiB file is a large object) | `pack` |
-| task wall minus Command wall (ms, 3 runs; the first packs run also warms the files) | 380, 257, 272 | 230, 227, 236 |
-| object bytes | 182,680,914 | 183,289,278 (ZIP headers, descriptors and central directory of 2,002 blobs, the file index) |
+| objects committed (measured) | `pack` and `L0` (the 170 MiB file is a large object) | `pack` |
+| bytes read, `rchar` (measured, all three rounds identical) | 545.5 MiB | 375.6 MiB |
+| task overhead per action, ms (measured, three rounds) | 380, 257, 272 | 230, 227, 236 |
+| median task overhead, ms (measured) | 272 | 230 |
+| bytes of the objects (measured) | 182,680,914 | 183,289,278 |
 
-The difference in bytes read is 169.9 MiB, one read of the large file. The wall time is about 10 to 40% lower with a warm cache (median 272 ms against 230 ms); a cold
-cache pays the second read in disk time. The output phase is 0.24 s of a 3.9 s task here, so the gain is small for this
-Command and grows with output size. Found on the way: in the packs format a large file inside an output *directory* is
-refused (`large slot 0 holds ..., which no output names`); the one-pass object has no such case, since a large blob is a
-record like any other.
+**Bytes read.** The difference is 169.9 MiB (measured: 545.5 - 375.6), one read of the 170 MiB file, as the design says: the
+packs format reads each output twice, one-pass once. Both totals also hold what the Command and its children read, which
+`/proc/self/io` counts once they are reaped: 170 MiB of `/dev/urandom` for `big` and about 36 MiB for the shell and the 2,000
+`head` runs (inferred from a run with a 1 MiB `big`, which read 38.5 MiB with packs and 37.6 MiB with one-pass; the inference
+is that the Command's share is the same for both formats). The outputs' own share is then about 340 MiB with packs and 170
+MiB with one-pass (inferred), plus the small files, which both formats read once.
+
+**Task overhead per action.** One-pass is faster by 42 ms at the median (measured: 272 - 230), and by 27 to 150 ms across
+rounds (measured pairs: 380 vs 230, 257 vs 227, 272 vs 236); the first packs round also pays for a cold start of the harness's
+files, so the median is the figure to quote, not the mean (303 against 231 ms, a 72 ms difference, measured). The gap is the
+second read of the 170 MiB file from a warm page cache plus the second object (the large object's separate create, write and
+rename); on a cold cache or a slower disk the second read costs more (inferred; not measured here). The output phase is
+about 0.25 s of a task of about 3.9 s in this setup, so the share saved is small for this Command and grows with output size.
+
+**Object size.** One-pass is 608,364 bytes longer (measured; 0.33%): the ZIP64 local header (68 bytes for a 18-byte name) and
+data descriptor (24 bytes) of each of 2,002 blobs, their central directory entries (about 128 bytes each), and the file index
+(about 150 bytes a file). The split of the 608,364 between those is inferred from the format, not measured separately.
+
+**Not measured.** A cold cache; a put directory on the node's tierstore (the harness wrote to a plain directory, so the
+commit rename cost of the real store is in neither column); several actions at once; the frontend's ingest time for the two
+formats; memory use of either writer.

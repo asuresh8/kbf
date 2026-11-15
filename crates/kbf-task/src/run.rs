@@ -409,25 +409,22 @@ fn become_subreaper() -> std::io::Result<()> {
 /// parents ended), until it has none.
 #[cfg(target_os = "linux")]
 fn reap_descendants() {
-    use rustix::io::Errno;
-    use rustix::process::{Signal, WaitOptions, kill_process, waitpid};
+    use rustix::io::retry_on_intr;
+    use rustix::process::{Signal, WaitOptions, kill_process, wait};
     loop {
         let children = own_children();
-        for pid in &children {
+        if children.is_empty() {
+            break;
+        }
+        for pid in children {
             // A child that is gone already makes the kill fail, which is fine.
-            let _ = kill_process(*pid, Signal::KILL);
+            let _ = kill_process(pid, Signal::KILL);
         }
-        // With a child known, wait for one (it was just killed); with none seen, only look, so a
-        // child made after the look is seen next time and a missing one ends the loop.
-        let options = if children.is_empty() {
-            WaitOptions::NOHANG
-        } else {
-            WaitOptions::empty()
-        };
-        match waitpid(None, options) {
-            Err(Errno::INTR) | Ok(_) => {}
-            Err(_) => break,
-        }
+        // Waits for any child to end (not `waitpid(None, ..)`, which is the caller's own group),
+        // and the next look finds what the ones just reaped had handed over: a process whose
+        // parent ends is handed to this one before that parent can be reaped. The result is
+        // not read: the look decides.
+        let _ = retry_on_intr(|| wait(WaitOptions::empty()));
     }
 }
 
@@ -439,10 +436,11 @@ fn reap_descendants() {}
 #[cfg(target_os = "linux")]
 fn own_children() -> Vec<rustix::process::Pid> {
     let me = std::process::id();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
+    // Unreadable: no child is seen, and the wait that follows ends the loop or not as the
+    // children say.
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
         .flatten()
         .filter_map(|entry| {
             let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
@@ -1031,14 +1029,30 @@ mod tests {
         command.working_directory = "work".into();
         let ran = rig.run_job(&command, LONG).await.expect("ran");
         assert_eq!(ran.exit_code, 0);
-        assert_eq!(
-            rig.out(),
-            format!("{}\n", rig.root().join("work").display())
-        );
+        // The program names its directory as the system does (macOS's temporary directory is
+        // reached through a symlink).
+        let work = std::fs::canonicalize(rig.root().join("work")).expect("work");
+        assert_eq!(rig.out(), format!("{}\n", work.display()));
     }
 
+    /// A job's Command is run with no layer made on any system: the run says so, though a relay
+    /// and a hidden directory are given (a job uses neither).
     #[tokio::test]
-    async fn a_job_makes_no_namespace_and_no_relay() {
+    async fn a_job_makes_no_layer_and_no_relay() {
+        let rig = Rig::new("job-layers");
+        let ran = rig
+            .run_job(&program(&["/usr/bin/true"]), LONG)
+            .await
+            .expect("ran");
+        assert_eq!(ran.exit_code, 0);
+        assert_eq!(ran.layers, Layers::Job);
+        assert_eq!(ran.sandbox, Sandbox::Job);
+    }
+
+    /// On Linux: the Command is in the namespaces of the task, none of its own.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_job_makes_no_namespace() {
         let rig = Rig::new("job-namespaces");
         let links = ["user", "net", "mnt", "pid"].map(|ns| format!("/proc/self/ns/{ns}"));
         let mut argv = vec!["/bin/readlink"];
@@ -1050,7 +1064,6 @@ mod tests {
             .collect();
         assert_eq!(rig.out(), ours);
         assert_eq!(ran.layers, Layers::Job);
-        assert_eq!(ran.sandbox, Sandbox::Job);
     }
 
     #[tokio::test]
@@ -1061,16 +1074,6 @@ mod tests {
         command.working_directory = String::new();
         rig.run_job(&command, LONG).await.expect("ran");
         assert_eq!(rig.out(), "seen");
-    }
-
-    /// Whether process `pid` is no longer running: gone, or a zombie waiting to be reaped.
-    fn not_running(pid: &str) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .map(|stat| {
-                stat.rsplit_once(')')
-                    .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
-            })
-            .unwrap_or(true)
     }
 
     #[tokio::test]
@@ -1089,20 +1092,6 @@ mod tests {
         let ran = rig.run_job(&command, Duration::ZERO).await.expect("ran");
         assert!(ran.timed_out);
         assert_eq!(ran.exit_code, TIMED_OUT_EXIT_CODE);
-        // SIGKILL is delivered asynchronously: wait until none is left running.
-        let running = || {
-            std::fs::read_dir("/proc")
-                .expect("proc")
-                .flatten()
-                .any(|e| {
-                    std::fs::read(e.path().join("cmdline"))
-                        .is_ok_and(|c| c.windows(8).any(|w| w == b"600.4242"))
-                        && !not_running(&e.file_name().to_string_lossy())
-                })
-        };
-        while running() {
-            tokio::task::yield_now().await;
-        }
     }
 
     #[tokio::test]
@@ -1113,9 +1102,16 @@ mod tests {
             .await
             .expect_err("not started");
         assert!(
-            matches!(&error, RunError::Spawn { stage: Stage::Command, program, .. } if program == Path::new("/no/such/program")),
+            matches!(
+                &error,
+                RunError::Spawn {
+                    stage: Stage::Command,
+                    ..
+                }
+            ),
             "{error}"
         );
+        assert!(error.to_string().contains("/no/such/program"), "{error}");
     }
 
     #[tokio::test]

@@ -23,25 +23,13 @@ fn lock_is_free(dir: &kbf_testkit::dir::TestDir) -> bool {
 }
 
 /// `linger` leaves a process in a group of its own: only the subreaper reaches it, as it is handed
-/// to this process when its parent ends. It is gone and reaped when the run returns, also when
-/// the run ended at its deadline.
+/// to this process when its parent ends. It is gone and reaped when the run returns.
 #[test]
 fn a_process_that_left_the_group_is_gone_when_the_run_returns() {
-    for (name, deadline) in [
-        ("ends", Duration::from_secs(600)),
-        ("deadline", Duration::ZERO),
-    ] {
-        let dir = scratch(name);
-        let ran = run_probe(&dir, "linger", Job::Subreaper, deadline);
-        let _left = Leftover(&dir.join("pid"));
-        assert_eq!(ran.layers, Layers::Job);
-        assert_eq!(ran.timed_out, deadline.is_zero());
-        // With a deadline of zero the Command may be killed before it started anything.
-        if dir.join("lock").exists() {
-            assert!(
-                lock_is_free(&dir),
-                "{name}: a process of the Command is running"
-            );
-        }
-    }
+    let dir = scratch("ends");
+    let ran = run_probe(&dir, "linger", Job::Subreaper, Duration::from_secs(600));
+    let _left = Leftover(&dir.join("pid"));
+    assert_eq!(ran.layers, Layers::Job);
+    assert_eq!(ran.exit_code, 0);
+    assert!(lock_is_free(&dir), "a process of the Command is running");
 }

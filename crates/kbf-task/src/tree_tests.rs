@@ -564,7 +564,8 @@ async fn the_streams_and_home_are_in_the_run_directory_and_not_outputs() {
 }
 
 /// Asserts that a tree job starts its Command directly in the job: it is in the namespaces of the
-/// task (no user, network, mount or PID namespace of its own).
+/// task (no user, network, mount or PID namespace of its own). Linux: where there are namespaces.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_tree_job_starts_its_command_in_the_tasks_own_namespaces() {
     let dir = scratch("direct");
@@ -627,6 +628,20 @@ async fn a_directory_output_with_a_file_over_the_record_cap_packs_and_validates(
         ),
         "{puts:?}"
     );
+}
+
+/// Asserts how the Command is run: a tree job starts it directly (its group is ended, and with
+/// the subreaper set by the binary's own start every process it left); one without `--tree` keeps
+/// the sandbox.
+#[test]
+fn a_tree_job_runs_its_command_directly_and_one_without_a_tree_in_the_sandbox() {
+    let (dir, digest) = copy_tree("job-of");
+    let mut cli = tree_cli(&dir, &digest);
+    assert_eq!(crate::task::job_of(&cli), Some(crate::run::Job::Group));
+    cli.subreaper = true;
+    assert_eq!(crate::task::job_of(&cli), Some(crate::run::Job::Subreaper));
+    cli.tree = None;
+    assert_eq!(crate::task::job_of(&cli), None);
 }
 
 /// Asserts that a sink with more pack slots than a manifest can name is a setup failure before

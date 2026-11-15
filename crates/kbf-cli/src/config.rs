@@ -135,6 +135,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     (
         "history",
         &[
+            "history-credentials-file",
             "history-index-root",
             "history-objects",
             "invocation-memory",

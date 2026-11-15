@@ -327,3 +327,52 @@ async fn the_store_prints_without_its_contents() {
 
     assert_eq!(format!("{:?}", rig.stored), "Stored { .. }");
 }
+
+/// Asserts that a result already checked is committed with its record: the result is then the
+/// action's entry and is found with the digest of its encoding, a record that is not the
+/// result's is refused and writes nothing, and a state store that cannot take the row is
+/// `Unavailable`.
+#[tokio::test]
+async fn a_checked_result_is_committed_with_its_record() {
+    let rig = Rig::new().await;
+    let ((small, _), _) = uploaded(&rig).await;
+    let result = names(&small);
+    let (first, second) = (blob_of(b"an action").0, blob_of(b"another action").0);
+    let record = rig
+        .backend
+        .prepare_action_result(&result)
+        .await
+        .expect("prepared");
+    let other = rig
+        .backend
+        .prepare_action_result(&ActionResult::default())
+        .await
+        .expect("prepared");
+
+    let committed = rig
+        .backend
+        .commit_prepared(first, record.clone(), &result)
+        .await;
+    let mismatched = rig.backend.commit_prepared(second, other, &result).await;
+    rig.index.fail_put_action(1);
+    let unavailable = rig.backend.commit_prepared(second, record, &result).await;
+
+    committed.expect("committed");
+    let (digest, held) = rig
+        .stored
+        .action_result(&first)
+        .await
+        .expect("asked")
+        .expect("a row");
+    assert_eq!(held, result);
+    assert_eq!(digest, kbf_segments::sha256(&result.encode_to_vec()));
+    assert!(matches!(mismatched, Err(StorageError::Invalid(_))));
+    assert!(matches!(unavailable, Err(StorageError::Unavailable(_))));
+    assert!(
+        rig.stored
+            .action_result(&second)
+            .await
+            .expect("asked")
+            .is_none()
+    );
+}

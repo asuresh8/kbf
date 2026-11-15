@@ -220,6 +220,7 @@ fn js_agent_settings_become_the_executors_config() {
         "--executor-max-run-secs=1800",
         "--executor-default-timeout-secs=900",
         "--executor-call-timeout-secs=3",
+        "--executor-poll-ms=250",
         "--executor-failed-stderr-log-bytes=2048",
     ])
     .expect("flags");
@@ -245,6 +246,7 @@ fn js_agent_settings_become_the_executors_config() {
     assert_eq!(config.max_run, Duration::from_secs(1800));
     assert_eq!(config.default_timeout, Duration::from_secs(900));
     assert_eq!(config.call_timeout, Duration::from_secs(3));
+    assert_eq!(config.poll, Duration::from_millis(250));
     assert_eq!(config.failed_stderr_log_bytes, 2048);
 }
 
@@ -738,4 +740,34 @@ fn the_stderr_log_bytes_take_zero_to_the_output_cap() {
     }
     let why = js_with(&["--executor-failed-stderr-log-bytes=8193"]).expect_err("refused");
     assert!(why.contains("--executor-failed-stderr-log-bytes"), "{why}");
+}
+
+/// Asserts that a js-agent executor given no `--executor-poll-ms` polls every 1000 ms.
+#[test]
+fn the_poll_interval_defaults_to_one_second() {
+    let config = js_with(&[])
+        .expect("flags")
+        .executor
+        .js
+        .expect("js-agent")
+        .config;
+    assert_eq!(config.poll, Duration::from_millis(1000));
+}
+
+/// Asserts that `--executor-poll-ms` outside 100 to 10000 is refused, and the ends are taken.
+#[test]
+fn the_poll_interval_outside_its_range_is_refused() {
+    for bad in [
+        "--executor-poll-ms=0",
+        "--executor-poll-ms=99",
+        "--executor-poll-ms=10001",
+    ] {
+        let why = refused(&[bad]);
+        assert!(why.contains("executor-poll-ms"), "{bad}: {why}");
+    }
+    let low = js_with(&["--executor-poll-ms=100"]).expect("low end");
+    assert_eq!(
+        low.executor.js.expect("js-agent").config.poll,
+        Duration::from_millis(100)
+    );
 }

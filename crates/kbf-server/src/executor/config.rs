@@ -232,7 +232,7 @@ impl Config {
             default_timeout: Duration::from_secs(3000),
             failed_stderr_log_bytes: FAILED_STDERR_LOG_BYTES,
             heartbeat: Duration::from_secs(5),
-            poll: Duration::from_millis(500),
+            poll: Duration::from_millis(1000),
             call_timeout: Duration::from_secs(5),
             pass_budget: Duration::from_secs(10),
             fence_after: SELF_FENCE,

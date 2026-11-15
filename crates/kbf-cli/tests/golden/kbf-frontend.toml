@@ -371,6 +371,8 @@ task-out-mode = "presigned"
 # task-put-endpoint = "URL"
 # The region the presigned writes to `--task-put-endpoint` are signed for
 task-put-region = "us-east-1"
+# The most seconds the waits add up to before a create-only write of an action tree to the tier store (`cas/l/<sha256>`) gives up on a 503 ("retry later", which the store answers while it registers: 10 to 40 s), so the lease fails only after this long. A write whose connection turns out to be dead is made once more at once, whatever this says. 0 never waits for a 503. Used only with `--task-secret-file` and `--task-out-mode put-dir`
+task-put-retry-secs = 60
 # The base URL a task reads its inputs from: the job-facing read listener, as `https://host:port` with no path (a grant's token is a bearer secret and crosses only a TLS connection; `http://` is refused at start). A blob is `GET <url>/<hash>/<size>`
 # task-read-url = "URL"
 # The run wall limit a run is prepared for, in seconds, at least 1 and at most 14400: a task's presigned write and read grant are good for this plus `--task-url-slack-secs`. Used only with `--task-secret-file`

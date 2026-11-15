@@ -59,6 +59,7 @@ const PUT_REGION: &str = "task_put_region";
 const PUT_CREDENTIALS: &str = "task_put_credentials_file";
 const READ_URL: &str = "task_read_url";
 const RUN_WALL: &str = "task_run_wall_secs";
+const PUT_RETRY: &str = "task_put_retry_secs";
 const URL_SLACK: &str = "task_url_slack_secs";
 const MAX_DIGESTS: &str = "task_closure_max_digests";
 const MAX_BYTES: &str = "task_closure_max_bytes";
@@ -91,6 +92,11 @@ const DEFAULT_RUN_WALL_SECS: u64 = 7_200;
 /// The slack when `--task-url-slack-secs` is left out: 10 minutes (test-only, as above).
 #[cfg(test)]
 const DEFAULT_URL_SLACK_SECS: u64 = 600;
+
+/// The total wait for a 503 when `--task-put-retry-secs` is left out: 60 seconds (test-only, as
+/// above).
+#[cfg(test)]
+const DEFAULT_PUT_RETRY_SECS: u64 = 60;
 
 /// The cap of a large object when `--task-large-max-bytes` is left out: 512 MiB.
 #[cfg(test)]
@@ -187,6 +193,15 @@ pub(super) fn args() -> [Arg; 20] {
                 "The run wall limit a run is prepared for, in seconds, at least 1 and at most \
                  14400: a task's presigned write and read grant are good for this plus \
                  `--task-url-slack-secs`. Used only with `--task-secret-file`",
+            ),
+        Arg::new(PUT_RETRY)
+            .long("task-put-retry-secs")
+            .value_name("SECONDS")
+            .value_parser(clap::value_parser!(u64).range(0..=MAX_SECS))
+            // DEFAULT_PUT_RETRY_SECS, as above.
+            .default_value("60")
+            .help(
+                "The most seconds the waits add up to before a create-only write of an action tree to the tier store (`cas/l/<sha256>`) gives up on a 503 (\"retry later\", which the store answers while it registers: 10 to 40 s), so the lease fails only after this long. A write whose connection turns out to be dead is made once more at once, whatever this says. 0 never waits for a 503. Used only with `--task-secret-file` and `--task-out-mode put-dir`",
             ),
         Arg::new(URL_SLACK)
             .long("task-url-slack-secs")
@@ -379,6 +394,8 @@ pub struct TaskFlags {
     pub run_wall: Duration,
     /// `--task-url-slack-secs`.
     pub url_slack: Duration,
+    /// `--task-put-retry-secs`.
+    pub put_retry: Duration,
     /// `--task-closure-max-digests`.
     pub max_digests: usize,
     /// `--task-max-object-entries`.
@@ -444,6 +461,7 @@ pub(super) fn from_matches(m: &ArgMatches) -> Result<Option<TaskFlags>, String> 
         allow_plain_http_grant: plain,
         run_wall: secs(RUN_WALL),
         url_slack: secs(URL_SLACK),
+        put_retry: secs(PUT_RETRY),
         max_digests: usize::try_from(digests).unwrap_or(usize::MAX),
         max_object_entries: entries_of(m),
         max_object_manifest_bytes: m
@@ -523,6 +541,8 @@ pub struct PutDirFlags {
     pub roots: PutDirRoots,
     /// `--task-url-slack-secs`: the time past a run's wall that its directory's keys stay good.
     pub url_slack: Duration,
+    /// `--task-put-retry-secs`.
+    pub put_retry: Duration,
     /// `--task-closure-max-digests`.
     pub max_digests: usize,
     /// `--task-max-object-entries`.
@@ -557,6 +577,7 @@ pub(super) fn put_dir_from_matches(m: &ArgMatches) -> Result<Option<PutDirFlags>
             .map(|roots| roots.with_format(format_of(m)))
             .map_err(|error| format!("--task-out-root: {error}"))?,
         url_slack: Duration::from_secs(m.get_one::<u64>(URL_SLACK).copied().unwrap_or_default()),
+        put_retry: Duration::from_secs(m.get_one::<u64>(PUT_RETRY).copied().unwrap_or_default()),
         max_digests: usize::try_from(digests).unwrap_or(usize::MAX),
         max_object_entries: entries_of(m),
         max_object_manifest_bytes: m

@@ -24,6 +24,8 @@ enum Fault {
     None,
     Open,
     Write,
+    /// The second write fails: the first chunk after the head.
+    WriteLater,
     End,
 }
 
@@ -36,6 +38,7 @@ struct One {
     seen: Arc<Mutex<Seen>>,
     bytes: Vec<u8>,
     fault: Fault,
+    writes: usize,
 }
 
 impl Tee for Spool {
@@ -51,13 +54,20 @@ impl Tee for Spool {
             seen: Arc::clone(&self.seen),
             bytes: Vec::new(),
             fault: self.fault,
+            writes: 0,
         }))
     }
 }
 
 impl TeeFile for One {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        if self.fault == Fault::Write {
+        self.writes += 1;
+        let refused = match self.fault {
+            Fault::Write => true,
+            Fault::WriteLater => self.writes == 2,
+            _ => false,
+        };
+        if refused {
             return Err(std::io::Error::other("no room to write"));
         }
         self.bytes.extend_from_slice(bytes);
@@ -211,7 +221,7 @@ async fn store_file_tees_a_large_log() {
 
 #[tokio::test]
 async fn a_tee_that_fails_fails_the_collection() {
-    for fault in [Fault::Open, Fault::Write, Fault::End] {
+    for fault in [Fault::Open, Fault::Write, Fault::WriteLater, Fault::End] {
         let root = scratch("fault");
         std::fs::write(root.join("big"), large(4)).expect("write");
         let store = TeeStore::new(fault);

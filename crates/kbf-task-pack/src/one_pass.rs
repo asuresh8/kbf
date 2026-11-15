@@ -190,13 +190,18 @@ impl Entry {
     /// Checks that `record` is this entry's blob: its length, its CRC-32, then its digest.
     #[must_use]
     pub fn verify(&self, record: &[u8]) -> bool {
-        record.len() as u64 == self.digest.size_bytes
-            && crc32(record) == self.crc32
-            && Digest::new(
-                DigestFunction::Sha256,
-                Sha256::digest(record).into(),
-                record.len() as u64,
-            ) == self.digest
+        let digest = Digest::new(
+            DigestFunction::Sha256,
+            Sha256::digest(record).into(),
+            record.len() as u64,
+        );
+        [
+            record.len() as u64 == self.digest.size_bytes,
+            crc32(record) == self.crc32,
+            digest == self.digest,
+        ]
+        .iter()
+        .all(|ok| *ok)
     }
 }
 
@@ -225,26 +230,43 @@ pub struct Trailer {
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap_or([0; 2]))
+    let raw = bytes.get(at..at + 2).and_then(|b| b.try_into().ok());
+    raw.map_or(0, u16::from_le_bytes)
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap_or([0; 4]))
+    let raw = bytes.get(at..at + 4).and_then(|b| b.try_into().ok());
+    raw.map_or(0, u32::from_le_bytes)
 }
 
 fn u64_at(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap_or([0; 8]))
+    let raw = bytes.get(at..at + 8).and_then(|b| b.try_into().ok());
+    raw.map_or(0, u64::from_le_bytes)
+}
+
+/// The error of the first condition that holds, if any: every condition is evaluated (none
+/// indexes past a slice, the readers above give 0 for what is not there), so a list of checks
+/// is one place, not one branch each.
+fn first_of(checks: &[(bool, ObjectError)]) -> Result<(), ObjectError> {
+    match checks.iter().find(|(wrong, _)| *wrong) {
+        Some((_, error)) => Err(error.clone()),
+        None => Ok(()),
+    }
 }
 
 /// Whether `end`, the last bytes of an object, is the end of a one-pass object: the three end
 /// records' signatures and the magic.
 #[must_use]
 pub fn looks_like(end: &[u8]) -> bool {
-    end.len() == TAIL_LEN
-        && u32_at(end, 0) == SIG_EOCD64
-        && u32_at(end, 96) == SIG_LOCATOR
-        && u32_at(end, 116) == SIG_EOCD
-        && end[56..64] == MAGIC
+    [
+        end.len() == TAIL_LEN,
+        u32_at(end, 0) == SIG_EOCD64,
+        u32_at(end, 96) == SIG_LOCATOR,
+        u32_at(end, 116) == SIG_EOCD,
+        end.get(56..64) == Some(&MAGIC[..]),
+    ]
+    .iter()
+    .all(|ok| *ok)
 }
 
 impl Trailer {
@@ -254,44 +276,46 @@ impl Trailer {
     /// # Errors
     /// [`ObjectError`] for the first rule that fails.
     pub fn parse(end: &[u8], object_len: u64) -> Result<Self, ObjectError> {
-        if end.len() != TAIL_LEN {
-            return Err(ObjectError::Truncated {
-                needed: TAIL_LEN as u64,
-                available: end.len() as u64,
-            });
-        }
-        if !looks_like(end) {
-            return Err(ObjectError::BadMagic);
-        }
-        let layout = || ObjectError::Layout { actual: object_len };
-        // ZIP64 end record: size of the rest (44 + 40), versions, disks, counts, size, offset.
-        if u64_at(end, 4) != 44 + 40
-            || u32_at(end, 16) != 0
-            || u32_at(end, 20) != 0
-            || u64_at(end, 24) != u64_at(end, 32)
-        {
-            return Err(ObjectError::BadEnd);
-        }
+        let truncated = ObjectError::Truncated {
+            needed: TAIL_LEN as u64,
+            available: end.len() as u64,
+        };
+        let layout = ObjectError::Layout { actual: object_len };
+        let eocd64_at = object_len.saturating_sub(TAIL_LEN as u64);
+        let e = 116;
+        first_of(&[
+            (end.len() != TAIL_LEN, truncated),
+            (!looks_like(end), ObjectError::BadMagic),
+            // ZIP64 end record: size of the rest (44 + 40), versions, disks, counts.
+            (
+                [
+                    u64_at(end, 4) != 44 + 40,
+                    u32_at(end, 16) != 0,
+                    u32_at(end, 20) != 0,
+                    u64_at(end, 24) != u64_at(end, 32),
+                    // The locator: disk 0, the end record's offset, one disk.
+                    u32_at(end, 100) != 0,
+                    u64_at(end, 104) != eocd64_at,
+                    u32_at(end, 112) != 1,
+                    // The plain end record: no disks, saturated counts and offsets, no comment.
+                    u16_at(end, e + 4) != 0,
+                    u16_at(end, e + 6) != 0,
+                    u16_at(end, e + 8) != 0xFFFF,
+                    u16_at(end, e + 10) != 0xFFFF,
+                    u32_at(end, e + 12) != u32::MAX,
+                    u32_at(end, e + 16) != u32::MAX,
+                    u16_at(end, e + 20) != 0,
+                    // A record's end is not before the object's start.
+                    object_len < TAIL_LEN as u64,
+                ]
+                .iter()
+                .any(|wrong| *wrong),
+                ObjectError::BadEnd,
+            ),
+        ])?;
         let entry_count = u64_at(end, 32);
         let cd_size = u64_at(end, 40);
         let cd_offset = u64_at(end, 48);
-        let eocd64_at = object_len.checked_sub(TAIL_LEN as u64).ok_or_else(layout)?;
-        // The locator: disk 0, the end record's offset, one disk.
-        if u32_at(end, 100) != 0 || u64_at(end, 104) != eocd64_at || u32_at(end, 112) != 1 {
-            return Err(ObjectError::BadEnd);
-        }
-        // The plain end record: no disks, saturated counts and offsets, no comment.
-        let e = 116;
-        if u16_at(end, e + 4) != 0
-            || u16_at(end, e + 6) != 0
-            || u16_at(end, e + 8) != 0xFFFF
-            || u16_at(end, e + 10) != 0xFFFF
-            || u32_at(end, e + 12) != u32::MAX
-            || u32_at(end, e + 16) != u32::MAX
-            || u16_at(end, e + 20) != 0
-        {
-            return Err(ObjectError::BadEnd);
-        }
         let parsed = Self {
             manifest_offset: u64_at(end, 64),
             manifest_len: u64_at(end, 72),
@@ -301,25 +325,24 @@ impl Trailer {
             entry_count,
             object_len,
         };
-        let manifest_end = parsed
-            .manifest_offset
-            .checked_add(parsed.manifest_len)
-            .ok_or_else(layout)?;
-        let index_end = parsed
-            .index_offset
-            .checked_add(parsed.index_len)
-            .ok_or_else(layout)?;
+        let manifest_end = parsed.manifest_offset.checked_add(parsed.manifest_len);
+        let index_end = parsed.index_offset.checked_add(parsed.index_len);
         // The central directory follows the last record and ends where the end records start;
-        // the index member follows the manifest member.
-        let members = manifest_end <= parsed.index_offset && index_end <= cd_offset;
-        let ends = cd_offset.checked_add(cd_size) == Some(eocd64_at);
-        // Each entry takes 46 bytes at least, which bounds the count by the directory.
-        let counted = entry_count
-            .checked_mul(46)
-            .is_some_and(|least| least <= cd_size);
-        if !(members && ends && counted) {
-            return Err(layout());
-        }
+        // the index member follows the manifest member; each entry takes 46 bytes at least,
+        // which bounds the count by the directory.
+        first_of(&[(
+            [
+                manifest_end.is_none_or(|end| end > parsed.index_offset),
+                index_end.is_none_or(|end| end > cd_offset),
+                cd_offset.checked_add(cd_size) != Some(eocd64_at),
+                entry_count
+                    .checked_mul(46)
+                    .is_none_or(|least| least > cd_size),
+            ]
+            .iter()
+            .any(|wrong| *wrong),
+            layout,
+        )])?;
         Ok(parsed)
     }
 
@@ -354,53 +377,59 @@ struct Central<'a> {
 
 /// Reads the central directory entry at the start of `bytes`; its length too.
 fn central(bytes: &[u8], position: usize) -> Result<(Central<'_>, usize), ObjectError> {
-    let bad = || ObjectError::Entry { position };
-    if bytes.len() < 46 || u32_at(bytes, 0) != SIG_CENTRAL {
-        return Err(bad());
-    }
+    let bad = ObjectError::Entry { position };
     let method = u16_at(bytes, 10);
-    if method != METHOD_STORED {
-        return Err(ObjectError::Method { position, method });
-    }
     let (name_len, extra_len, comment_len) = (
         usize::from(u16_at(bytes, 28)),
         usize::from(u16_at(bytes, 30)),
         usize::from(u16_at(bytes, 32)),
     );
     let len = 46 + name_len + extra_len + comment_len;
-    if bytes.len() < len || comment_len != 0 {
-        return Err(bad());
-    }
-    let saturated = u32_at(bytes, 20) == u32::MAX
-        && u32_at(bytes, 24) == u32::MAX
-        && u32_at(bytes, 42) == u32::MAX;
-    if u16_at(bytes, 8) != FLAG_DESCRIPTOR || !saturated {
-        return Err(ObjectError::Flags { position });
-    }
+    let saturated = [
+        u32_at(bytes, 20) == u32::MAX,
+        u32_at(bytes, 24) == u32::MAX,
+        u32_at(bytes, 42) == u32::MAX,
+    ];
+    first_of(&[
+        (
+            [
+                bytes.len() < 46,
+                u32_at(bytes, 0) != SIG_CENTRAL,
+                bytes.len() < len,
+                comment_len != 0,
+            ]
+            .iter()
+            .any(|wrong| *wrong),
+            bad.clone(),
+        ),
+        (
+            method != METHOD_STORED,
+            ObjectError::Method { position, method },
+        ),
+        (
+            u16_at(bytes, 8) != FLAG_DESCRIPTOR || !saturated.iter().all(|ok| *ok),
+            ObjectError::Flags { position },
+        ),
+    ])?;
     let name = &bytes[46..46 + name_len];
     let mut extra = &bytes[46 + name_len..46 + name_len + extra_len];
     let (mut zip64, mut sha256) = (None, None);
     while !extra.is_empty() {
-        if extra.len() < 4 {
-            return Err(bad());
-        }
         let (tag, size) = (u16_at(extra, 0), usize::from(u16_at(extra, 2)));
-        let Some(data) = extra.get(4..4 + size) else {
-            return Err(bad());
-        };
-        match tag {
-            ZIP64_TAG if size == 24 => {
+        match (tag, size, extra.get(4..4 + size)) {
+            (ZIP64_TAG, 24, Some(data)) => {
                 zip64 = Some((u64_at(data, 0), u64_at(data, 8), u64_at(data, 16)));
             }
-            SHA256_TAG if size == 32 => sha256 = data.try_into().ok(),
-            _ => return Err(bad()),
+            (SHA256_TAG, 32, Some(data)) => sha256 = data.try_into().ok(),
+            _ => return Err(bad),
         }
         extra = &extra[4 + size..];
     }
-    let (size, compressed, header_offset) = zip64.ok_or_else(bad)?;
-    if size != compressed {
-        return Err(ObjectError::Flags { position });
-    }
+    let (size, compressed, header_offset) = zip64.unwrap_or_default();
+    first_of(&[
+        (zip64.is_none(), bad),
+        (size != compressed, ObjectError::Flags { position }),
+    ])?;
     let entry = Central {
         name,
         crc32: u32_at(bytes, 16),
@@ -422,110 +451,126 @@ impl Tail {
     /// # Errors
     /// [`ObjectError`] for the first rule that fails.
     pub fn parse(trailer: &Trailer, tail: &[u8]) -> Result<Self, ObjectError> {
-        if (tail.len() as u64) != trailer.tail_len() {
-            return Err(ObjectError::Truncated {
-                needed: trailer.tail_len(),
-                available: tail.len() as u64,
-            });
-        }
-        let layout = || ObjectError::Layout {
+        let layout = ObjectError::Layout {
             actual: trailer.object_len,
         };
+        first_of(&[(
+            (tail.len() as u64) != trailer.tail_len(),
+            ObjectError::Truncated {
+                needed: trailer.tail_len(),
+                available: tail.len() as u64,
+            },
+        )])?;
         // `tail` is as long as the end of an object a reader holds, so these fit `usize`.
         let at =
             |offset: u64| usize::try_from(offset - trailer.manifest_offset).unwrap_or(usize::MAX);
-        let slice = |offset: u64, len: u64, name: &'static str| {
+        let slice = |offset: u64, len: u64| {
             let start = at(offset);
-            start
-                .checked_add(usize::try_from(len).unwrap_or(usize::MAX))
-                .and_then(|end| tail.get(start..end))
-                .ok_or(ObjectError::Member { name })
+            let end = start.saturating_add(usize::try_from(len).unwrap_or(usize::MAX));
+            tail.get(start..end)
         };
-        let manifest = slice(trailer.manifest_offset, trailer.manifest_len, MANIFEST_NAME)?;
-        let files = slice(trailer.index_offset, trailer.index_len, INDEX_NAME)?;
-        let mut rest = tail
-            .get(at(trailer.cd_offset)..tail.len() - TAIL_LEN)
-            .ok_or_else(layout)?;
-        let (mut have_manifest, mut have_index) = (false, false);
+        let (manifest, files) = (
+            slice(trailer.manifest_offset, trailer.manifest_len),
+            slice(trailer.index_offset, trailer.index_len),
+        );
+        let directory = tail.get(at(trailer.cd_offset)..tail.len() - TAIL_LEN);
+        first_of(&[
+            (
+                manifest.is_none(),
+                ObjectError::Member {
+                    name: MANIFEST_NAME,
+                },
+            ),
+            (files.is_none(), ObjectError::Member { name: INDEX_NAME }),
+            (directory.is_none(), layout.clone()),
+        ])?;
+        let members = [
+            (
+                MANIFEST_NAME,
+                manifest.unwrap_or_default(),
+                trailer.manifest_offset,
+            ),
+            (INDEX_NAME, files.unwrap_or_default(), trailer.index_offset),
+        ];
+        let mut rest = directory.unwrap_or_default();
+        let mut seen = [0u8; 2];
         let mut entries: Vec<Entry> = Vec::new();
         for position in 0..usize::try_from(trailer.entry_count).unwrap_or(usize::MAX) {
             let (entry, len) = central(rest, position)?;
             rest = &rest[len..];
             let data = entry.header_offset + LOCAL_FIXED + entry.name.len() as u64 + LOCAL_EXTRA;
-            let name = String::from_utf8_lossy(entry.name).into_owned();
-            let member = if entry.name == MANIFEST_NAME.as_bytes() {
-                Some((
-                    MANIFEST_NAME,
-                    manifest,
-                    trailer.manifest_offset,
-                    &mut have_manifest,
-                ))
-            } else if entry.name == INDEX_NAME.as_bytes() {
-                Some((INDEX_NAME, files, trailer.index_offset, &mut have_index))
-            } else {
-                None
-            };
-            if let Some((member, bytes, offset, seen)) = member {
-                if std::mem::replace(seen, true) {
-                    return Err(ObjectError::Name { name });
-                }
-                if data != offset || entry.size != bytes.len() as u64 {
-                    return Err(ObjectError::Member { name: member });
-                }
-                if crc32(bytes) != entry.crc32 {
-                    return Err(ObjectError::Crc { name: member });
-                }
+            let member = members.iter().position(|m| m.0.as_bytes() == entry.name);
+            if let Some(i) = member {
+                let (name, bytes, offset) = members[i];
+                seen[i] = seen[i].saturating_add(1);
+                first_of(&[
+                    (
+                        data != offset || entry.size != bytes.len() as u64,
+                        ObjectError::Member { name },
+                    ),
+                    (crc32(bytes) != entry.crc32, ObjectError::Crc { name }),
+                ])?;
                 continue;
             }
-            if entry.name.len() != BLOB_NAME_LEN || !entry.name.starts_with(b"b/") {
-                return Err(ObjectError::Name { name });
-            }
-            let Some(sha256) = entry.sha256 else {
-                return Err(ObjectError::Entry { position });
-            };
-            if entry.size == 0 {
-                return Err(ObjectError::ZeroSize { offset: data });
-            }
-            let digest = Digest::new(DigestFunction::Sha256, sha256, entry.size);
+            let digest = Digest::new(
+                DigestFunction::Sha256,
+                entry.sha256.unwrap_or_default(),
+                entry.size,
+            );
             let end = data.checked_add(entry.size);
-            if end.is_none_or(|end| end > trailer.manifest_offset) {
-                return Err(ObjectError::OutOfBounds { digest });
-            }
+            first_of(&[
+                (
+                    entry.name.len() != BLOB_NAME_LEN || !entry.name.starts_with(b"b/"),
+                    ObjectError::Name {
+                        name: String::from_utf8_lossy(entry.name).into_owned(),
+                    },
+                ),
+                (entry.sha256.is_none(), ObjectError::Entry { position }),
+                (entry.size == 0, ObjectError::ZeroSize { offset: data }),
+                (
+                    end.is_none_or(|end| end > trailer.manifest_offset),
+                    ObjectError::OutOfBounds { digest },
+                ),
+            ])?;
             entries.push(Entry {
                 digest,
                 offset: data,
                 crc32: entry.crc32,
             });
         }
-        if !rest.is_empty() {
-            return Err(layout());
-        }
-        for (seen, name) in [(have_manifest, MANIFEST_NAME), (have_index, INDEX_NAME)] {
-            if !seen {
-                return Err(ObjectError::Name {
-                    name: name.to_owned(),
-                });
-            }
-        }
+        first_of(&[
+            (!rest.is_empty(), layout),
+            (
+                seen != [1, 1],
+                ObjectError::Name {
+                    name: "a member of the central directory is absent or twice".to_owned(),
+                },
+            ),
+        ])?;
         entries.sort_by_key(|e| e.digest);
-        if let Some(pair) = entries.windows(2).find(|p| p[0].digest == p[1].digest) {
-            return Err(ObjectError::Duplicate {
-                digest: pair[0].digest,
-            });
-        }
+        let twice = entries.windows(2).find(|p| p[0].digest == p[1].digest);
+        first_of(&[(
+            twice.is_some(),
+            ObjectError::Duplicate {
+                digest: twice.map_or(Digest::new(DigestFunction::Sha256, [0; 32], 0), |p| {
+                    p[0].digest
+                }),
+            },
+        )])?;
         let mut by_offset: Vec<&Entry> = entries.iter().collect();
         by_offset.sort_by_key(|e| e.offset);
-        for pair in by_offset.windows(2) {
-            if pair[1].offset < pair[0].range().end {
-                return Err(ObjectError::Overlap {
-                    first: pair[0].digest,
-                    second: pair[1].digest,
-                });
-            }
+        let overlap = by_offset
+            .windows(2)
+            .find(|p| p[1].offset < p[0].range().end);
+        if let Some(pair) = overlap {
+            return Err(ObjectError::Overlap {
+                first: pair[0].digest,
+                second: pair[1].digest,
+            });
         }
         Ok(Self {
-            manifest: manifest.to_vec(),
-            files: files.to_vec(),
+            manifest: members[0].1.to_vec(),
+            files: members[1].1.to_vec(),
             entries,
         })
     }

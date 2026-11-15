@@ -57,9 +57,7 @@ type Remembered = Arc<StdMutex<Option<io::Error>>>;
 /// Remembers `error` if it is the first, and returns it.
 fn record(failure: &Remembered, error: io::Error) -> io::Error {
     let mut first = failure.lock().unwrap_or_else(PoisonError::into_inner);
-    if first.is_none() {
-        *first = Some(io::Error::new(error.kind(), error.to_string()));
-    }
+    first.get_or_insert_with(|| io::Error::new(error.kind(), error.to_string()));
     error
 }
 
@@ -150,12 +148,12 @@ impl Spool {
     }
 
     /// The first digest `manifest` names that the object does not hold, if any. The empty blob is
-    /// implicit and never missing.
+    /// implicit and never named by `output_digests`.
     pub async fn missing(&self, manifest: &TaskManifest) -> Option<Digest> {
         let writer = self.writer.lock().await;
         manifest
             .output_digests()
-            .find(|digest| digest.size_bytes != 0 && !writer.holds(digest))
+            .find(|digest| !writer.holds(digest))
     }
 
     /// The files of the output directories `manifest` names ([`crate::files`]): each Tree

@@ -924,3 +924,27 @@ async fn a_one_pass_manifest_that_is_not_a_manifest_is_bad() {
     let got = farm.run().await;
     farm.refused(got, RejectReason::BadManifest);
 }
+
+/// Asserts that the range a one-pass object's end asks the frontend to read is bounded by what
+/// the entry limit allows, whatever the file index holds: a file index of 5 MiB in an object of
+/// seven entries is `TooLarge` when the limit is seven, and read when it is more.
+#[tokio::test]
+async fn a_file_index_longer_than_the_entry_limit_allows_is_too_large_unread() {
+    let farm = PutDir::new().await;
+    let manifest = farm.one_object_manifest();
+    let mut writer = ObjectWriter::new(Vec::new());
+    for record in farm.records() {
+        writer.blob(&sha256(record), record).expect("written");
+    }
+    let json = manifest.to_json().expect("json");
+    let object = writer.finish(&json, &vec![b' '; 5 << 20]).expect("done").0;
+    farm.put(Slot::Pack(0), &object).await;
+    let seven = UntrustedLimits {
+        max_object_entries: 7,
+        ..UntrustedLimits::default()
+    };
+    let got = farm.run_with(&seven).await;
+    farm.refused(got, RejectReason::TooLarge);
+    // The index is not JSON the frontend reads: with room for it the object is ingested.
+    assert!(matches!(farm.run().await, Ingested::Ran { .. }));
+}

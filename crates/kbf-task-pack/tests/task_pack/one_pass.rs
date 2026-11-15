@@ -542,3 +542,70 @@ fn blobs_are_named_by_a_counter_and_the_members_by_fixed_names() {
         ]
     );
 }
+
+#[test]
+fn entries_with_a_damaged_name_extra_field_or_length_are_refused() {
+    let object = sample();
+    let a = entry_at(&object, 0);
+    // An extra field cut to less than a header, a field of the wrong size for its tag, a name
+    // longer than the directory, and a directory that holds fewer entries than it says.
+    for (what, damage) in [
+        (
+            "short extra",
+            Box::new(move |o: &mut [u8]| o[a + 30] = 2) as Box<dyn Fn(&mut [u8])>,
+        ),
+        (
+            "zip64 size",
+            Box::new(move |o: &mut [u8]| o[a + 46 + 18 + 2] = 16),
+        ),
+        (
+            "sha size",
+            Box::new(move |o: &mut [u8]| o[a + 46 + 18 + 28 + 2] = 16),
+        ),
+        ("long name", Box::new(move |o: &mut [u8]| o[a + 29] = 0xFF)),
+    ] {
+        let got = damaged(|o| damage(o));
+        assert_eq!(
+            got.map(drop),
+            Err(ObjectError::Entry { position: 0 }),
+            "{what}"
+        );
+    }
+    let got = damaged(|o| {
+        let at = o.len() - TAIL_LEN + 24;
+        // Six entries are claimed (and fit the directory's length) where four are held.
+        o[at..at + 8].copy_from_slice(&6u64.to_le_bytes());
+        o[at + 8..at + 16].copy_from_slice(&6u64.to_le_bytes());
+    });
+    assert_eq!(got.map(drop), Err(ObjectError::Entry { position: 4 }));
+}
+
+#[test]
+fn a_blob_entry_with_no_sha_256_or_a_member_twice_is_refused() {
+    let object = sample();
+    let (a, manifest) = (entry_at(&object, 0), entry_at(&object, 2));
+    // The manifest's entry renamed to a blob's name has no SHA-256 tag.
+    let got =
+        damaged(|o| o[manifest + 46..manifest + 46 + 18].copy_from_slice(b"b/0000000000000009"));
+    assert_eq!(got.map(drop), Err(ObjectError::Entry { position: 2 }));
+    // A blob's entry renamed to the manifest's: the manifest twice (the second is not where
+    // the end records say).
+    let got = damaged(|o| o[a + 46..a + 46 + 18].copy_from_slice(MANIFEST_NAME.as_bytes()));
+    assert_eq!(
+        got.map(drop),
+        Err(ObjectError::Member {
+            name: MANIFEST_NAME
+        })
+    );
+    // The manifest's entry renamed to a blob's name AND the blob's SHA-256 tag kept: no member
+    // is left, which the directory's end says.
+    let got =
+        damaged(|o| o[manifest + 46..manifest + 46 + 18].copy_from_slice(b"b/0000000000000009"));
+    assert!(got.is_err());
+}
+
+#[test]
+fn looks_like_refuses_what_is_not_an_end() {
+    assert!(!looks_like(&[]));
+    assert!(!looks_like(&[0; TAIL_LEN]));
+}

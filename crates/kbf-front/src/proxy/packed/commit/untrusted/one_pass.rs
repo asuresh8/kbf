@@ -72,7 +72,11 @@ impl Ingest<'_> {
 
         let manifest = TaskManifest::parse_with(&tail.manifest, self.limits.max_large_bytes)
             .map_err(|_| RejectReason::BadManifest)?;
-        if manifest.lease != self.lease || manifest.action != *self.action {
+        let ours = [
+            manifest.lease == self.lease,
+            manifest.action == *self.action,
+        ];
+        if !ours.iter().all(|ok| *ok) {
             return Err(RejectReason::WrongKey.into());
         }
         self.issued(&manifest)?;
@@ -85,7 +89,8 @@ impl Ingest<'_> {
                 .binary_search_by(|entry| entry.digest.cmp(digest))
                 .is_ok()
         };
-        if (manifest.output_digests()).any(|digest| digest.size_bytes != 0 && !held(&digest)) {
+        // `output_digests` leaves out the empty blob, which no object holds.
+        if (manifest.output_digests()).any(|digest| !held(&digest)) {
             return Err(RejectReason::Incomplete.into());
         }
 

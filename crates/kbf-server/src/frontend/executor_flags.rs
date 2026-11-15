@@ -75,6 +75,7 @@ const FAILED_STDERR_LOG: &str = "executor_failed_stderr_log_bytes";
 const MAX_RUN: &str = "executor_max_run_secs";
 const DEFAULT_TIMEOUT: &str = "executor_default_timeout_secs";
 const CALL_TIMEOUT: &str = "executor_call_timeout_secs";
+const PREPARE_LIMIT: &str = "executor_prepare_limit_secs";
 const NETWORK: &str = "executor_network";
 const OPEN_NETWORK: &str = "executor_allow_open_network";
 
@@ -417,6 +418,16 @@ pub(super) fn args() -> Vec<Arg> {
              seconds. Under the fence time. Used only with `--executor js-agent`",
             "5",
         ),
+        number(
+            PREPARE_LIMIT,
+            "executor-prepare-limit-secs",
+            "How long the inputs of one run (its action, its input tree published into the \
+             store, its keys) may take to prepare, in seconds. The `Start`'s own window ends \
+             only the submit, not the preparation, which goes on until this limit so the tree \
+             it publishes is there for the run the farm starts next. Used only with \
+             `--executor js-agent`",
+            "300",
+        ),
         Arg::new(NETWORK)
             .long("executor-network")
             .value_name("LEVEL")
@@ -625,6 +636,7 @@ fn js_agent_flags(m: &ArgMatches) -> Result<JsAgentFlags, String> {
     config.max_run = secs(MAX_RUN);
     config.default_timeout = secs(DEFAULT_TIMEOUT);
     config.call_timeout = secs(CALL_TIMEOUT);
+    config.prepare_limit = secs(PREPARE_LIMIT);
     config.network = network(m);
     config.allow_open_network = m.get_flag(OPEN_NETWORK);
     Ok(JsAgentFlags {

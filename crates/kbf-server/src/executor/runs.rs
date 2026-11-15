@@ -54,6 +54,9 @@ pub(super) struct Task {
     pub(super) timeline: Timeline,
     /// The silence of the host holding its job was seen and counted.
     silence_seen: bool,
+    /// The preparation of its job, while it runs on its own task. Dropped with the task, it is
+    /// not stopped: see [`HostWorker::preparing`].
+    preparing: Option<JoinHandle<Result<Arc<Prepared>, Settled>>>,
 }
 
 pub(super) enum Stage {
@@ -124,14 +127,22 @@ impl Task {
     }
 }
 
+/// Where the preparation of a task's job stands.
+enum Preparing {
+    Ready(Arc<Prepared>),
+    /// Not done yet: the next pass asks again.
+    Pending,
+    Failed(Settled),
+}
+
 /// What came of trying to submit a task.
 enum Submitted {
     /// Not now: try again while the `Start` is valid.
     Wait(Waiting),
     Running(Running),
     Settled(Settled),
-    /// The `Start`'s window ended while the task was being prepared or its submit was not
-    /// answered: dropped, as one that arrived late is, after the job that may exist is
+    /// The `Start`'s window ended while the task's submit was not answered, or as the job
+    /// was prepared: dropped, as one that arrived late is, after the job that may exist is
     /// cancelled.
     Late(Option<String>),
 }
@@ -160,6 +171,7 @@ impl HostWorker {
                 stage: Stage::Waiting(waiting),
                 timeline: Timeline::default(),
                 silence_seen: false,
+                preparing: None,
             });
     }
 
@@ -276,6 +288,52 @@ impl HostWorker {
         });
     }
 
+    /// The preparation of `lease`'s job: begun on its own task if it has none, and waited for
+    /// for one poll at most. One that ends after the window is judged late by the caller.
+    ///
+    /// A preparation that outlasts the window is not stopped with it: it goes on, bounded by
+    /// [`Config::prepare_limit`], so the input tree it publishes is there, and the memo of the
+    /// writer holds it, when the farm runs the action again.
+    async fn preparing(
+        &mut self,
+        ctx: &Ctx<'_>,
+        lease: LeaseId,
+        action: &Digest,
+        booking: Booking,
+    ) -> Preparing {
+        let begun = self
+            .tasks
+            .get_mut(&lease)
+            .and_then(|task| task.preparing.take());
+        let mut handle = begun.unwrap_or_else(|| {
+            let (preparer, action) = (ctx.preparer(), action.clone());
+            let limit = preparer.cfg.prepare_limit;
+            tokio::spawn(async move {
+                let preparing = prepare(&preparer, lease, &action, booking);
+                tokio::time::timeout(limit, preparing)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Settled::Infra(format!(
+                            "the inputs of the run were not ready within {limit:?}"
+                        )))
+                    })
+            })
+        });
+        match tokio::time::timeout(ctx.cfg.poll, &mut handle).await {
+            Err(_) => {
+                self.tasks
+                    .entry(lease)
+                    .and_modify(|task| task.preparing = Some(handle));
+                Preparing::Pending
+            }
+            Ok(Ok(Ok(prepared))) => Preparing::Ready(prepared),
+            Ok(Ok(Err(settled))) => Preparing::Failed(settled),
+            Ok(Err(error)) => Preparing::Failed(Settled::Infra(format!(
+                "the preparation of the run ended without an answer: {error}"
+            ))),
+        }
+    }
+
     async fn submit(
         &mut self,
         ctx: &Ctx<'_>,
@@ -285,21 +343,20 @@ impl HostWorker {
         deadline: Instant,
     ) -> Submitted {
         // What preparing reads (the CAS, the store, the grant service) is not the job
-        // service's and is not bounded by it: it is bounded by the window, which it cannot
-        // outlast and have the submit still be good.
+        // service's, and it can take longer than the window: a tree of many files is
+        // published into the store first. It runs on a task of its own, so the pass waits for
+        // it one poll at most and goes on to the other workers:
+        // one slow preparation must not hold the heartbeats and the starts of the rest.
         let prepared = match &w.prepared {
             Some(prepared) => Arc::clone(prepared),
-            None => {
-                let preparing = prepare(ctx, lease, action, w.booking);
-                match tokio::time::timeout_at(deadline, preparing).await {
-                    Ok(Ok(prepared)) => {
-                        self.stamp(lease, Mark::Prepared, ctx.now(), ctx);
-                        prepared
-                    }
-                    Ok(Err(settled)) => return Submitted::Settled(settled),
-                    Err(_) => return Submitted::Late(None),
+            None => match self.preparing(ctx, lease, action, w.booking).await {
+                Preparing::Ready(prepared) => {
+                    self.stamp(lease, Mark::Prepared, ctx.now(), ctx);
+                    prepared
                 }
-            }
+                Preparing::Pending => return Submitted::Wait(w),
+                Preparing::Failed(settled) => return Submitted::Settled(settled),
+            },
         };
         // The CAS read, the url and the grant each took as long as the store took: the window
         // is judged by the clock now, the last moment before the submit.

@@ -262,7 +262,8 @@ adds to the action's timeout), `--executor-failed-stderr-log-bytes` (512, at mos
 none: the end of a failed job's standard error, with the job's secrets redacted, is one WARN line
 of the frontend's log, `the end of the standard error of a job that did not end well`; the whole
 output goes with the result as before), `--executor-max-run-secs` and `--executor-default-timeout-secs`
-(3000), `--executor-call-timeout-secs` (5), `--executor-work-dir` (for the task tool),
+(3000), `--executor-call-timeout-secs` (5), `--executor-prepare-limit-secs` (300: how long a run's input
+tree may take to publish; the `Start` window ends the submit, not the preparation), `--executor-work-dir` (for the task tool),
 `--executor-allow-plain-http-put` (until the store serves TLS), and
 `--executor-allow-plain-http-grant` (a read listener without TLS, on a farm's own network; both
 plain-http flags are off by default), and `--executor-locate` (off by default: the task is given

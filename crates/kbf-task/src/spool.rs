@@ -16,6 +16,7 @@
 //! an unreadable output.
 
 use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
 use kbf_outputs::{Tee, TeeFile};
@@ -23,9 +24,24 @@ use kbf_proto::reapi;
 use kbf_task_pack::TaskManifest;
 use kbf_task_pack::one_pass::{ObjectWriter, Streaming, Written};
 use kbf_types::Digest;
+use prost::Message as _;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::digest;
+use crate::files;
+use crate::out_dir::{OutDirError, pack_name};
+use crate::outputs::{OutputLimits, Outputs, collect_spooled};
+use crate::task::Failure;
+
+/// What `--stage-and-commit` writes (`--object-format`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ObjectFormat {
+    /// Packs and large objects, planned from the digests: the format before one-pass.
+    #[default]
+    Packs,
+    /// One object, written while the outputs are read.
+    OnePass,
+}
 
 /// The bytes buffered for the file at one time.
 const BUFFER_BYTES: usize = 1 << 20;
@@ -36,10 +52,10 @@ type Sink = BufWriter<Box<dyn Write + Send>>;
 type Writer = ObjectWriter<Sink>;
 
 /// The first error the file gave a write, shared with the files being teed.
-type Failure = Arc<StdMutex<Option<io::Error>>>;
+type Remembered = Arc<StdMutex<Option<io::Error>>>;
 
 /// Remembers `error` if it is the first, and returns it.
-fn record(failure: &Failure, error: io::Error) -> io::Error {
+fn record(failure: &Remembered, error: io::Error) -> io::Error {
     let mut first = failure.lock().unwrap_or_else(PoisonError::into_inner);
     if first.is_none() {
         *first = Some(io::Error::new(error.kind(), error.to_string()));
@@ -47,20 +63,64 @@ fn record(failure: &Failure, error: io::Error) -> io::Error {
     error
 }
 
+/// Collects the outputs into `spool`: `paths` are the input root, the working directory and the
+/// declared outputs, `logs` the stdout and stderr files. A write the object's file refused is a
+/// put failure (exit 13), not an output that could not be read.
+///
+/// # Errors
+/// A [`Failure`].
+pub(crate) async fn collect(
+    spool: &Arc<Spool>,
+    paths: (&Path, &str, &[String]),
+    logs: (&Path, &Path),
+    limits: OutputLimits,
+) -> Result<Outputs, Failure> {
+    let (root, working_directory, outputs) = paths;
+    let collecting = collect_spooled(
+        root,
+        working_directory,
+        outputs,
+        logs.0,
+        logs.1,
+        limits,
+        spool,
+    );
+    match (collecting.await, spool.write_failure()) {
+        (Err(_), Some(source)) => Err(OutDirError::Write {
+            name: pack_name(0),
+            source,
+        }
+        .into()),
+        (done, _) => Ok(done?),
+    }
+}
+
+/// Reads `len` bytes at an offset of what the object's file holds so far.
+pub type Reader = Box<dyn Fn(u64, u64) -> io::Result<Vec<u8>> + Send + Sync>;
+
+/// A reader of a file that cannot be read back, for tests of what does not need it.
+#[cfg(test)]
+pub(crate) fn unreadable() -> Reader {
+    Box::new(|_, _| Err(io::Error::other("this test file is not read back")))
+}
+
 /// The object being written.
 pub struct Spool {
     writer: Arc<Mutex<Writer>>,
-    failure: Failure,
+    failure: Remembered,
+    reader: Arc<Reader>,
 }
 
 impl Spool {
-    /// A spool writing to `file`, which is empty.
+    /// A spool writing to `file`, which is empty, and reading back what it wrote through
+    /// `reader` (the Trees of the output directories, for their files).
     #[must_use]
-    pub fn new(file: Box<dyn Write + Send>) -> Arc<Self> {
+    pub fn new(file: Box<dyn Write + Send>, reader: Reader) -> Arc<Self> {
         let sink = BufWriter::with_capacity(BUFFER_BYTES, file);
         Arc::new(Self {
             writer: Arc::new(Mutex::new(ObjectWriter::new(sink))),
-            failure: Failure::default(),
+            failure: Remembered::default(),
+            reader: Arc::new(reader),
         })
     }
 
@@ -98,19 +158,54 @@ impl Spool {
             .find(|digest| digest.size_bytes != 0 && !writer.holds(digest))
     }
 
-    /// Ends the object with `manifest` (its JSON), the index and the trailer, flushes it, and
+    /// The files of the output directories `manifest` names ([`crate::files`]): each Tree
+    /// is read back from the object (it is a small record the task wrote, not an output), and
+    /// each file's offset is where the object has it.
+    ///
+    /// # Errors
+    /// A Tree that cannot be read or is not a tree of records of the object, or the file refused
+    /// the flush.
+    pub async fn files(&self, manifest: &TaskManifest) -> io::Result<Vec<u8>> {
+        let manifest = manifest.clone();
+        let (writer, reader) = (Arc::clone(&self.writer), Arc::clone(&self.reader));
+        let trees: Vec<(String, Digest)> = (manifest.output_directories.iter())
+            .map(|dir| (dir.path.clone(), dir.tree))
+            .collect();
+        let failure = Arc::clone(&self.failure);
+        let done = tokio::task::spawn_blocking(move || {
+            let mut writer = writer.blocking_lock();
+            writer.sink().flush().map_err(|e| record(&failure, e))?;
+            let mut dirs = Vec::new();
+            for (path, tree) in trees {
+                let at = writer
+                    .offset_of(&tree)
+                    .ok_or_else(|| io::Error::other(format!("the Tree {tree} is not a record")))?;
+                let bytes = reader(at, tree.size_bytes)?;
+                dirs.push((
+                    path,
+                    reapi::Tree::decode(bytes.as_slice()).map_err(io::Error::other)?,
+                ));
+            }
+            files::build(&manifest, &dirs, &|digest| writer.offset_of(digest))
+                .map_err(io::Error::other)
+        })
+        .await;
+        done.map_err(io::Error::other)?
+    }
+
+    /// Ends the object with `manifest` (its JSON), the `files`, the index and the trailer, flushes it, and
     /// returns what was written. Every other holder of the spool must be gone.
     ///
     /// # Errors
     /// The file refused a write, or something still holds the spool.
-    pub fn finish(self: Arc<Self>, manifest: &[u8]) -> io::Result<Written> {
+    pub fn finish(self: Arc<Self>, manifest: &[u8], files: &[u8]) -> io::Result<Written> {
         let busy = || io::Error::other("the object is still being written");
         let this = Arc::try_unwrap(self).map_err(|_| busy())?;
         let writer = Arc::try_unwrap(this.writer)
             .map_err(|_| busy())?
             .into_inner();
         let record = |error| record(&this.failure, error);
-        let (mut sink, written) = writer.finish(manifest).map_err(record)?;
+        let (mut sink, written) = writer.finish(manifest, files).map_err(record)?;
         sink.flush().map_err(record)?;
         Ok(written)
     }
@@ -133,7 +228,7 @@ impl Tee for Spool {
 struct Streamed {
     guard: OwnedMutexGuard<Writer>,
     at: Streaming,
-    failure: Failure,
+    failure: Remembered,
 }
 
 impl TeeFile for Streamed {

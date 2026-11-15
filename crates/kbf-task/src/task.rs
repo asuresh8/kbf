@@ -43,8 +43,7 @@ use crate::digest;
 use crate::fetch::{BlobSource, FetchError, HttpBlobSource, LocatedSource, native_roots};
 use crate::inputs::{Inputs, fetch_inputs};
 use crate::network;
-use crate::out_dir::OutDirError;
-use crate::outputs::{Blobs, OutputLimits, collect_outputs, collect_spooled};
+use crate::outputs::{Blobs, OutputLimits, collect_outputs};
 use crate::pack::{PackError, build, build_extra};
 use crate::place::{manifest_reserve, output_cap, place};
 use crate::plan::Limits;
@@ -55,7 +54,7 @@ use crate::put::{
 use crate::put_urls::PutUrls;
 use crate::run::{Run, RunError, output_paths, run};
 use crate::sandbox;
-use crate::spool::Spool;
+use crate::spool::{self, ObjectFormat, Spool};
 
 /// Exit code: an input could not be read, checked or laid out.
 pub const EXIT_FETCH: u8 = 10;
@@ -276,16 +275,6 @@ pub struct Cli {
     /// has none, and its Command gets no PID namespace.
     #[arg(skip)]
     pub relay: Option<PathBuf>,
-}
-
-/// What `--stage-and-commit` writes (`--object-format`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum ObjectFormat {
-    /// Packs and large objects, planned from the digests: the format before one-pass.
-    #[default]
-    Packs,
-    /// One object, written while the outputs are read.
-    OnePass,
 }
 
 impl Cli {
@@ -592,27 +581,12 @@ pub(crate) async fn collected_into(
     let paths: Vec<String> = output_paths(&command).into_iter().cloned().collect();
     let outputs = match spool {
         Some(spool) => {
-            let collecting = collect_spooled(
-                &root,
-                &command.working_directory,
-                &paths,
-                &stdout,
-                &stderr,
-                cli.limits,
-                spool,
+            let paths = (
+                root.as_path(),
+                command.working_directory.as_str(),
+                paths.as_slice(),
             );
-            // A write the object's file refused is a put failure (exit 13), not an output that
-            // could not be read.
-            match (collecting.await, spool.write_failure()) {
-                (Err(_), Some(source)) => {
-                    return Err(OutDirError::Write {
-                        name: crate::out_dir::pack_name(0),
-                        source,
-                    }
-                    .into());
-                }
-                (done, _) => done?,
-            }
+            spool::collect(spool, paths, (&stdout, &stderr), cli.limits).await?
         }
         None => {
             collect_outputs(

@@ -591,7 +591,7 @@ fn one_pass_json(json: &[u8], records: &[&[u8]]) -> Vec<u8> {
     for record in records {
         writer.blob(&sha256(record), record).expect("written");
     }
-    writer.finish(json).expect("finished").0
+    writer.finish(json, b"").expect("finished").0
 }
 
 impl PutDir {
@@ -778,7 +778,7 @@ async fn dead_bytes_between_records_are_accepted() {
         writer.end(again, &sha256(record)).expect("ended");
     }
     let object = writer
-        .finish(&manifest.to_json().expect("json"))
+        .finish(&manifest.to_json().expect("json"), b"")
         .expect("done")
         .0;
     farm.put(Slot::Pack(0), &object).await;
@@ -827,7 +827,10 @@ async fn a_damaged_or_oversize_one_pass_object_is_refused_unread() {
     writer
         .blob(&sha256(&farm.p.beta), &farm.p.beta)
         .expect("written");
-    let big = writer.finish(&vec![b' '; (4 << 20) + 1]).expect("done").0;
+    let big = writer
+        .finish(&vec![b' '; (4 << 20) + 1], b"")
+        .expect("done")
+        .0;
     farm.put(Slot::Pack(0), &big).await;
     let got = farm.run().await;
     farm.refused(got, RejectReason::TooLarge);
@@ -902,7 +905,7 @@ async fn a_one_pass_manifest_that_is_not_a_manifest_is_bad() {
     writer
         .blob(&sha256(&farm.p.beta), &farm.p.beta)
         .expect("written");
-    let object = writer.finish(b"{not json").expect("done").0;
+    let object = writer.finish(b"{not json", b"").expect("done").0;
     farm.put(Slot::Pack(0), &object).await;
     let got = farm.run().await;
     farm.refused(got, RejectReason::BadManifest);

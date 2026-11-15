@@ -33,19 +33,21 @@ object the frontend copies into the CAS, and every large file is read twice.
 ```text
 blobs      each blob's bytes, back to back in the order the task produced them (see 4: gaps are possible)
 manifest   the TaskManifest JSON (the bytes `to_json_with` writes today), packs 1 and no large object
+files      the neutral file index (JSON, below; may be empty)
 index      N entries of 52 bytes, ascending by (hash, size): hash [32] | size u64 | offset u64 | crc32c u32
 trailer    64 bytes, little endian:
              manifest_offset u64 | manifest_len u64 | index_offset u64 | entry_count u64
              | index_crc32c u32 | manifest_crc32c u32 | digest_function u8 = 1 | reserved [3] = 0
-             | version u32 = 1 | trailer_crc32c u32 (of the first 48 bytes) | reserved u32 = 0 | magic [8] = "KBFTASK\n"
+             | version u32 = 1 | files_crc32c u32 | trailer_crc32c u32 (of the first 52 bytes)
+             | magic [8] = "KBFTASK\n"
 ```
 
 The entry is the entry of a `kbf-segments` footer, so the code that reads digests and offsets is shared in meaning. The
 magic differs from a segment's (`KBFSEG\r\n`), so no reader takes one format for the other: an old frontend refuses the
 object as `Malformed` and an old tool refuses it at its trailer.
 
-Rules a reader checks before it trusts the index: `manifest_offset + manifest_len == index_offset`;
-`index_offset + 52 * entry_count + 64 == object length`; both CRCs; entries strictly ascending and of size at least 1; every
+Rules a reader checks before it trusts the index: `manifest_offset + manifest_len <= index_offset` (the bytes between are the file index);
+`index_offset + 52 * entry_count + 64 == object length`; the three CRCs; entries strictly ascending and of size at least 1; every
 entry inside `[0, manifest_offset)`; no two entries overlap. Gaps between entries are allowed (4). Order of the blobs and
 their contiguity carry no meaning, so the writer needs no plan.
 
@@ -63,6 +65,55 @@ A valid uncompressed tar (pax headers, index as a final entry) would let `tar -t
 - Every consumer here reads by `(offset, length)` from the pack index; none lists, so nothing needs `tar`. The format is
   small enough to read by hand with the offsets of 3 when an operator must.
 
+### The neutral file index (the `files` section)
+
+The footer carries one index in no consumer's format. The manifest already has the exit code, stdout, stderr, the timing
+and the top-level output files and symlinks; the `files` section adds, for every output file and symlink **including
+those below an output directory**, its full path, size, executable bit, SHA-256 and the offset of its bytes in this
+object, and every directory (so an empty one is not lost):
+
+```json
+{"v":1,"files":[{"path":"out/d/z","size":3,"exec":false,"sha256":"<hex>","offset":20}],
+ "symlinks":[{"path":"out/d/l","target":"z"}],"dirs":["out/d","out/d/sub"]}
+```
+
+Each list is sorted bytewise by path; `offset` is absent for the empty file (no record). The task builds it from the Trees
+it wrote itself (read back from its own file after a flush: they are small records of its own, not outputs) and the
+manifest. It is a footer of facts about this object, and nothing in it is tierstore's or REAPI's.
+
+**Layering.** Two systems name the same folder, and they number it differently:
+
+| | REAPI / Buck2 | tierstore |
+|---|---|---|
+| a folder | `Directory` proto, digest = SHA-256 of the proto | tree manifest v1 JSON, digest = SHA-256 of the manifest |
+| a file | SHA-256 and size | SHA-256 and size, plus `source` = {key, offset} |
+
+The two folder digests are different numbers for the same folder; the file digests are the same. kbf-task writes neither
+format into the object. **The frontend is the only translator**: from the manifest and the file index it derives (a) the
+REAPI ActionResult and the Directory and Tree records (the Buck2 side), and (b) tierstore tree manifests, with `source` =
+{this object's key, offset}, when it publishes an input tree (`crates/kbf-front/src/action_tree/encode.rs`). The key is the
+frontend's own (it minted it), which is why the task could not write a tierstore manifest even if it were to: the manifest's
+digest covers the key. Because (b) uses the frontend's own encoder, a manifest built from the index has the bytes, and so
+the digest, the frontend would have built from the Trees: publishing stays deduplicated against any earlier publication. A
+reused subtree (a later action's input equal to an earlier output directory) stays cheap because the frontend memoises the
+manifest it built for each output directory (`action_tree/memo.rs`), so only newly composed top-level directories are
+written. The frontend still builds the ActionResult from the manifest and the footer in the one ranged read of section 5.
+
+**Why whole-tar mounting of dependencies is not used** (mounting each dependency's output, as a tar or one overlay layer,
+into the action's root):
+
+- Buck2 composes an input root from parts of many outputs at paths it chooses; a dependency's output is rarely mounted
+  whole, at the place it was written.
+- Hermeticity: an action must not see a file it did not declare, and a whole-output mount shows every undeclared sibling.
+- Overlay layers have a limit and an action may have hundreds of dependencies.
+
+So the input tree is composed per action from digests, and the object is only where file bytes live: each manifest entry
+points at a span of it.
+
+**Status.** This pull request writes the object and the index and reads the index back in its tests. The frontend's
+derivation of tierstore manifests from it, and of Directory/Tree records without reading the Trees, is the next change; the
+ingest here still builds the result from the manifest and records the entries, as for a pack.
+
 ## 4. The one-pass algorithm, and dedup
 
 `kbf-outputs` walks the outputs one file at a time. With a **tee** installed (`Store::tee`, default none: every other user
@@ -78,7 +129,7 @@ of the crate is unchanged) a file is handled by size:
   index entry).
 - Directory and Tree messages and stdout/stderr go through the same writer (`Store::put`), deduplicated before they are
   written.
-- After the walk: manifest, index, trailer. The object's own SHA-256 is taken as the bytes go out, for the store's
+- After the walk: manifest, file index, index, trailer. The object's own SHA-256 is taken as the bytes go out, for the store's
   `<name>.sha256-<hex>.part` rename. Then the commit rename, as today.
 
 The only reads of an output are the one that hashes and writes it. A file that changes while it is read is not detected by a
@@ -115,7 +166,7 @@ Additive: a new object kind under the same key, a new flag, no field of any ship
   to `packs`; objects already written stay readable by the new frontend, and a frontend rolled back to a release before
   this one refuses a one-pass object, so roll the config back before the binary.
 - **The test** that runs the previous release on new data and the reverse: `one_pass_and_packs_ingest_side_by_side` (frontend
-  reads an old pack and a one-pass object in the same farm) and the task test that, with no flag, writes the bytes the
+  reads an old pack and a one-pass object in the same farm) and the task test `without_the_one_pass_format_the_pack_is_the_one_of_before`, which with no flag reads the pack the
   previous writer wrote.
 
 ## 7. Failure modes

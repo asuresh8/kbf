@@ -5,12 +5,14 @@
 //! blobs      each blob's bytes, in the order they were written (a duplicate's bytes may sit
 //!            between two records, unindexed)
 //! manifest   the manifest JSON
+//! files      the neutral file index (JSON, may be empty): see [`Tail::files`]
 //! index      N x 52 bytes, strictly ascending by digest:
 //!              hash [32] | size u64 | offset u64 | crc32c u32
 //! trailer    64 bytes, little endian:
 //!              manifest_offset u64 | manifest_len u64 | index_offset u64 | entry_count u64
 //!              | index_crc32c u32 | manifest_crc32c u32 | digest_function u8 | reserved [3]
-//!              | version u32 | trailer_crc32c u32 | reserved u32 | magic [8]
+//!              | version u32 | files_crc32c u32 | trailer_crc32c u32 (of the first 52 bytes)
+//!              | magic [8]
 //! ```
 //!
 //! [`ObjectWriter`] writes it through any [`Write`], blob by blob, and ends with the manifest,
@@ -68,6 +70,9 @@ pub enum ObjectError {
     /// The trailer's own CRC-32C does not match its bytes.
     #[error("one-pass trailer CRC mismatch")]
     TrailerCrc,
+    /// The files' CRC-32C does not match their bytes.
+    #[error("one-pass files CRC mismatch")]
+    FilesCrc,
     /// The offsets of the trailer do not add up to the object's length.
     #[error("one-pass offsets do not describe an object of {actual} bytes")]
     Layout {
@@ -115,12 +120,15 @@ pub struct Trailer {
     pub manifest_offset: u64,
     /// The manifest's length.
     pub manifest_len: u64,
+    /// How many bytes of files follow the manifest (0 for none).
+    pub files_len: u64,
     /// Where the index starts.
     pub index_offset: u64,
     /// How many entries the index holds.
     pub entry_count: u64,
     index_crc32c: u32,
     manifest_crc32c: u32,
+    files_crc32c: u32,
 }
 
 impl Trailer {
@@ -134,8 +142,9 @@ impl Trailer {
         out[36..40].copy_from_slice(&self.manifest_crc32c.to_le_bytes());
         out[40] = SHA256_CODE;
         out[44..48].copy_from_slice(&VERSION.to_le_bytes());
-        let crc = crc32c(&out[..48]);
-        out[48..52].copy_from_slice(&crc.to_le_bytes());
+        out[48..52].copy_from_slice(&self.files_crc32c.to_le_bytes());
+        let crc = crc32c(&out[..52]);
+        out[52..56].copy_from_slice(&crc.to_le_bytes());
         out[56..64].copy_from_slice(&MAGIC);
         out
     }
@@ -167,19 +176,21 @@ impl Trailer {
         if trailer[40] != SHA256_CODE {
             return Err(ObjectError::UnsupportedDigestFunction(trailer[40]));
         }
-        if trailer[41..44] != [0; 3] || trailer[52..56] != [0; 4] {
+        if trailer[41..44] != [0; 3] {
             return Err(ObjectError::ReservedNotZero);
         }
-        if crc32c(&trailer[..48]) != u32_at(48) {
+        if crc32c(&trailer[..52]) != u32_at(52) {
             return Err(ObjectError::TrailerCrc);
         }
-        let parsed = Self {
+        let mut parsed = Self {
             manifest_offset: u64_at(0),
             manifest_len: u64_at(8),
+            files_len: 0,
             index_offset: u64_at(16),
             entry_count: u64_at(24),
             index_crc32c: u32_at(32),
             manifest_crc32c: u32_at(36),
+            files_crc32c: u32_at(48),
         };
         let layout = || ObjectError::Layout { actual: object_len };
         let manifest_end = parsed
@@ -195,17 +206,21 @@ impl Trailer {
             .checked_add(index_len)
             .and_then(|end| end.checked_add(TRAILER_LEN as u64))
             .ok_or_else(layout)?;
-        if manifest_end != parsed.index_offset || end != object_len {
+        if manifest_end > parsed.index_offset || end != object_len {
             return Err(layout());
         }
+        parsed.files_len = parsed.index_offset - manifest_end;
         Ok(parsed)
     }
 
-    /// How many bytes from the end of the object hold the manifest, the index and the trailer:
-    /// what a reader fetches next.
+    /// How many bytes from the end of the object hold the manifest, the files, the index and
+    /// the trailer: what a reader fetches next.
     #[must_use]
     pub const fn tail_len(&self) -> u64 {
-        self.manifest_len + self.entry_count * ENTRY_LEN as u64 + TRAILER_LEN as u64
+        self.manifest_len
+            + self.files_len
+            + self.entry_count * ENTRY_LEN as u64
+            + TRAILER_LEN as u64
     }
 }
 
@@ -214,6 +229,10 @@ impl Trailer {
 pub struct Tail {
     /// The manifest record's bytes.
     pub manifest: Vec<u8>,
+    /// The neutral file index: every output file and symlink with its size, mode, SHA-256 and
+    /// offset in this object (docs/design/one-pass-task-object.md the end of section 3). Opaque here;
+    /// empty for none.
+    pub files: Vec<u8>,
     /// Every record, in digest order.
     pub entries: Vec<IndexEntry>,
 }
@@ -238,9 +257,14 @@ impl Tail {
         // just now, so both fit `usize` on any target that could hold the bytes.
         let manifest_len = usize::try_from(trailer.manifest_len).unwrap_or(usize::MAX);
         let manifest = &tail[..manifest_len];
-        let index = &tail[manifest_len..tail.len() - TRAILER_LEN];
+        let files_len = usize::try_from(trailer.files_len).unwrap_or(usize::MAX);
+        let files = &tail[manifest_len..manifest_len + files_len];
+        let index = &tail[manifest_len + files_len..tail.len() - TRAILER_LEN];
         if crc32c(manifest) != trailer.manifest_crc32c {
             return Err(ObjectError::ManifestCrc);
+        }
+        if crc32c(files) != trailer.files_crc32c {
+            return Err(ObjectError::FilesCrc);
         }
         if crc32c(index) != trailer.index_crc32c {
             return Err(ObjectError::IndexCrc);
@@ -279,6 +303,7 @@ impl Tail {
         }
         Ok(Self {
             manifest: manifest.to_vec(),
+            files: files.to_vec(),
             entries,
         })
     }
@@ -352,6 +377,17 @@ impl<W: Write> ObjectWriter<W> {
     #[must_use]
     pub fn holds(&self, digest: &Digest) -> bool {
         self.entries.contains_key(digest)
+    }
+
+    /// Where the blob `digest` starts in the object, if it is held.
+    #[must_use]
+    pub fn offset_of(&self, digest: &Digest) -> Option<u64> {
+        self.entries.get(digest).map(|(offset, _)| *offset)
+    }
+
+    /// The sink, for a caller that must flush it before it reads what was written.
+    pub fn sink(&mut self) -> &mut W {
+        &mut self.out
     }
 
     /// The bytes written so far.
@@ -431,14 +467,15 @@ impl<W: Write> ObjectWriter<W> {
         Ok(true)
     }
 
-    /// Ends the object: writes `manifest`, the index and the trailer, and returns the sink with
-    /// what was written. The sink is not flushed.
+    /// Ends the object: writes `manifest`, `files` (may be empty), the index and the trailer,
+    /// and returns the sink with what was written. The sink is not flushed.
     ///
     /// # Errors
     /// The sink's error.
-    pub fn finish(mut self, manifest: &[u8]) -> io::Result<(W, Written)> {
+    pub fn finish(mut self, manifest: &[u8], files: &[u8]) -> io::Result<(W, Written)> {
         let manifest_offset = self.len;
         self.put(manifest)?;
+        self.put(files)?;
         let mut index = Vec::with_capacity(self.entries.len() * ENTRY_LEN);
         for (digest, (offset, crc32c)) in &self.entries {
             let entry = IndexEntry {
@@ -453,10 +490,12 @@ impl<W: Write> ObjectWriter<W> {
         let trailer = Trailer {
             manifest_offset,
             manifest_len: manifest.len() as u64,
+            files_len: files.len() as u64,
             index_offset,
             entry_count: self.entries.len() as u64,
             index_crc32c: crc32c(&index),
             manifest_crc32c: crc32c(manifest),
+            files_crc32c: crc32c(files),
         };
         self.put(&trailer.encode())?;
         let object = Digest::new(

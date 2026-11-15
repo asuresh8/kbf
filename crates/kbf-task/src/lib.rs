@@ -155,6 +155,7 @@
 pub(crate) mod child;
 pub mod digest;
 pub mod fetch;
+pub mod files;
 mod inputs;
 pub mod network;
 pub mod out_dir;

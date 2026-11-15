@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use kbf_segments::sha256;
 use kbf_task_pack::one_pass::{TRAILER_LEN, Tail, Trailer};
 
+use prost::Message as _;
+
 use super::*;
 use crate::digest::to_reapi;
 
@@ -75,7 +77,7 @@ async fn open(spool: &Arc<Spool>) -> io::Result<Box<dyn TeeFile>> {
 #[tokio::test]
 async fn blobs_from_memory_and_a_teed_file_make_one_object() {
     let file = Shared::default();
-    let spool = Spool::new(Box::new(file.clone()));
+    let spool = Spool::new(Box::new(file.clone()), crate::spool::unreadable());
     spool
         .put(&to_reapi(&sha256(b"small")), b"small".to_vec())
         .await
@@ -89,7 +91,7 @@ async fn blobs_from_memory_and_a_teed_file_make_one_object() {
     tee.write(b"big ").expect("write");
     tee.write(b"file").expect("write");
     tee.end(&to_reapi(&sha256(b"big file"))).expect("end");
-    spool.finish(b"{}").expect("finished");
+    spool.finish(b"{}", b"").expect("finished");
     let bytes = file.0.lock().expect("lock").clone();
     assert_eq!(&bytes[..13], b"smallbig file");
     let held: Vec<_> = entries(&bytes).iter().map(|e| e.digest).collect();
@@ -100,7 +102,7 @@ async fn blobs_from_memory_and_a_teed_file_make_one_object() {
 #[tokio::test]
 async fn a_blob_put_while_a_file_is_teed_waits_and_lands_after_it() {
     let file = Shared::default();
-    let spool = Spool::new(Box::new(file.clone()));
+    let spool = Spool::new(Box::new(file.clone()), crate::spool::unreadable());
     let mut tee = open(&spool).await.expect("open");
     tee.write(b"aaaa").expect("write");
     let waiting = {
@@ -112,14 +114,14 @@ async fn a_blob_put_while_a_file_is_teed_waits_and_lands_after_it() {
     tee.write(b"bbbb").expect("write");
     tee.end(&to_reapi(&sha256(b"aaaabbbb"))).expect("end");
     waiting.await.expect("joined").expect("put");
-    spool.finish(b"{}").expect("finished");
+    spool.finish(b"{}", b"").expect("finished");
     let bytes = file.0.lock().expect("lock").clone();
     assert_eq!(&bytes[..10], b"aaaabbbbzz");
 }
 
 #[tokio::test]
 async fn what_the_manifest_names_that_the_object_lacks_is_missing() {
-    let spool = Spool::new(Box::new(Shared::default()));
+    let spool = Spool::new(Box::new(Shared::default()), crate::spool::unreadable());
     spool
         .put(&to_reapi(&sha256(b"here")), b"here".to_vec())
         .await
@@ -132,7 +134,7 @@ async fn what_the_manifest_names_that_the_object_lacks_is_missing() {
 
 #[tokio::test]
 async fn a_digest_that_is_not_sha256_text_is_refused_by_put_and_end() {
-    let spool = Spool::new(Box::new(Shared::default()));
+    let spool = Spool::new(Box::new(Shared::default()), crate::spool::unreadable());
     let bad = reapi::Digest {
         hash: "NOT-HEX".to_owned(),
         size_bytes: 3,
@@ -146,7 +148,7 @@ async fn a_digest_that_is_not_sha256_text_is_refused_by_put_and_end() {
 #[tokio::test]
 async fn a_file_that_refuses_a_write_is_remembered_whichever_step_it_refused() {
     // A refusal while a blob is put.
-    let spool = Spool::new(Box::new(Refusing));
+    let spool = Spool::new(Box::new(Refusing), crate::spool::unreadable());
     let big = vec![1u8; BUFFER_BYTES + 1];
     let put = spool.put(&to_reapi(&sha256(&big)), big).await;
     assert!(put.is_err());
@@ -155,31 +157,122 @@ async fn a_file_that_refuses_a_write_is_remembered_whichever_step_it_refused() {
         io::ErrorKind::StorageFull
     );
     // A refusal while a teed file's bytes are written, and then at the end of the object.
-    let spool = Spool::new(Box::new(Refusing));
+    let spool = Spool::new(Box::new(Refusing), crate::spool::unreadable());
     let mut tee = open(&spool).await.expect("open");
     assert!(tee.write(&vec![2u8; BUFFER_BYTES + 1]).is_err());
     drop(tee);
     assert!(spool.write_failure().is_some());
     // A refusal while the manifest is written, and while the file is flushed.
     for manifest in [vec![0u8; BUFFER_BYTES + 1], b"{}".to_vec()] {
-        let spool = Spool::new(Box::new(Refusing));
+        let spool = Spool::new(Box::new(Refusing), crate::spool::unreadable());
         let kept = Arc::clone(&spool.failure);
-        assert!(spool.finish(&manifest).is_err());
+        assert!(spool.finish(&manifest, b"").is_err());
         assert!(kept.lock().expect("lock").is_some());
     }
 }
 
 #[test]
 fn a_spool_that_is_still_shared_cannot_be_finished() {
-    let spool = Spool::new(Box::new(Shared::default()));
+    let spool = Spool::new(Box::new(Shared::default()), crate::spool::unreadable());
     let other = Arc::clone(&spool);
-    let error = spool.finish(b"{}").expect_err("shared");
+    let error = spool.finish(b"{}", b"").expect_err("shared");
     assert_eq!(error.to_string(), "the object is still being written");
     drop(other);
 }
 
 #[test]
 fn a_spool_with_no_failure_reports_none() {
-    let spool = Spool::new(Box::new(Shared::default()));
+    let spool = Spool::new(Box::new(Shared::default()), crate::spool::unreadable());
     assert!(spool.write_failure().is_none());
+}
+
+/// A spool over a file that can be read back at an offset.
+fn readable() -> (Arc<Spool>, Shared) {
+    let file = Shared::default();
+    let back = file.clone();
+    let reader: Reader = Box::new(move |offset, len| {
+        let bytes = back.0.lock().expect("lock");
+        let (start, end) = (offset as usize, (offset + len) as usize);
+        bytes
+            .get(start..end)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| io::Error::other("past the end"))
+    });
+    (Spool::new(Box::new(file.clone()), reader), file)
+}
+
+#[tokio::test]
+async fn the_file_index_reads_each_tree_back_and_gives_offsets_in_the_object() {
+    use kbf_proto::reapi::{Directory, FileNode, Tree};
+    let (spool, _) = readable();
+    let dir = Directory {
+        files: vec![FileNode {
+            name: "f".to_owned(),
+            digest: Some(to_reapi(&sha256(b"file bytes"))),
+            ..FileNode::default()
+        }],
+        ..Directory::default()
+    };
+    let tree = Tree {
+        root: Some(dir),
+        children: Vec::new(),
+    };
+    let tree_bytes = tree.encode_to_vec();
+    spool
+        .put(&to_reapi(&sha256(b"file bytes")), b"file bytes".to_vec())
+        .await
+        .expect("put");
+    spool
+        .put(&to_reapi(&sha256(&tree_bytes)), tree_bytes.clone())
+        .await
+        .expect("put");
+    let mut manifest = manifest_naming(sha256(b"file bytes"));
+    manifest.output_directories = vec![kbf_task_pack::OutputDirectory {
+        path: "d".to_owned(),
+        tree: sha256(&tree_bytes),
+    }];
+    let json = spool.files(&manifest).await.expect("indexed");
+    let json = String::from_utf8(json).expect("utf-8");
+    assert!(
+        json.contains(r#"{"path":"d/f","size":10,"exec":false"#),
+        "{json}"
+    );
+    assert!(json.contains(r#""offset":0}"#), "{json}");
+    assert!(json.contains(r#""dirs":["d"]"#), "{json}");
+}
+
+#[tokio::test]
+async fn a_tree_that_is_not_a_record_or_not_readable_fails_the_file_index() {
+    let (spool, _) = readable();
+    let mut manifest = manifest_naming(sha256(b"x"));
+    manifest.output_directories = vec![kbf_task_pack::OutputDirectory {
+        path: "d".to_owned(),
+        tree: sha256(b"never written"),
+    }];
+    let why = spool.files(&manifest).await.expect_err("not a record");
+    assert!(why.to_string().contains("is not a record"), "{why}");
+
+    // A record that is not a Tree.
+    let (spool, _) = readable();
+    spool
+        .put(
+            &to_reapi(&sha256(b"\xff\xff junk")),
+            b"\xff\xff junk".to_vec(),
+        )
+        .await
+        .expect("put");
+    manifest.output_directories[0].tree = sha256(b"\xff\xff junk");
+    assert!(spool.files(&manifest).await.is_err());
+
+    // A reader that fails, and a file that refuses the flush.
+    let spool = Spool::new(Box::new(Shared::default()), unreadable());
+    let tree = sha256(b"tree");
+    spool
+        .put(&to_reapi(&tree), b"tree".to_vec())
+        .await
+        .expect("put");
+    manifest.output_directories[0].tree = tree;
+    assert!(spool.files(&manifest).await.is_err());
+    let spool = Spool::new(Box::new(Refusing), unreadable());
+    assert!(spool.files(&manifest).await.is_err());
 }

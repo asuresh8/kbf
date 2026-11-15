@@ -45,10 +45,11 @@ use crate::out_dir::OutDir;
 use crate::plan::Limits;
 use crate::run::RunError;
 use crate::sandbox::GRANTS_DIR;
+use crate::spool::ObjectFormat;
 use crate::task::{
-    Cli, Failure, HttpSink, ObjectFormat, PackSink, check_argv_secrets, check_lease, check_slots,
-    collected, collected_into, complete, exit_code, http_sink, millis, named, put_urls,
-    sink_limits, trusted_roots,
+    Cli, Failure, HttpSink, PackSink, check_argv_secrets, check_lease, check_slots, collected,
+    collected_into, complete, exit_code, http_sink, millis, named, put_urls, sink_limits,
+    trusted_roots,
 };
 
 /// The Action's file, under the tree's root.

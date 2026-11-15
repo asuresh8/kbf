@@ -610,7 +610,7 @@ mod tests {
         std::fs::write(work.join("large"), &large).expect("large");
         std::fs::write(work.join("small"), b"small").expect("small");
         let file = Shared::default();
-        let spool = Spool::new(Box::new(file.clone()));
+        let spool = Spool::new(Box::new(file.clone()), crate::spool::unreadable());
         let paths = ["large".to_owned(), "small".to_owned()];
         let outputs = collect_spooled(
             &work,
@@ -624,7 +624,7 @@ mod tests {
         .await
         .expect("collected");
         assert!(outputs.blobs.is_empty());
-        spool.finish(b"{}").expect("finished");
+        spool.finish(b"{}", b"").expect("finished");
         let bytes = file.0.lock().expect("lock").clone();
         let trailer = Trailer::parse(&bytes[bytes.len() - TRAILER_LEN..], bytes.len() as u64)
             .expect("trailer");
@@ -638,7 +638,10 @@ mod tests {
         for blob in [&large[..], b"small", b"to stdout", b"to stderr"] {
             assert!(held.contains(&kbf_segments::sha256(blob)));
         }
-        let recorder = Recorder::spooling(Spool::new(Box::new(Shared::default())));
+        let recorder = Recorder::spooling(Spool::new(
+            Box::new(Shared::default()),
+            crate::spool::unreadable(),
+        ));
         let file = std::fs::File::open(out).expect("open");
         let why = recorder
             .put_file(file, digest_of(b"x"))

@@ -36,7 +36,7 @@ fn write(
             writer.end(at, &digest).expect("ended");
         }
     }
-    writer.finish(manifest).expect("finished")
+    writer.finish(manifest, b"listed").expect("finished")
 }
 
 /// The reader's two steps over `object`.
@@ -54,6 +54,7 @@ fn objects_round_trip_each_blob_at_its_entry() {
     let (object, written) = write(&refs, b"{\"manifest\":1}", 0);
     let tail = read(&object).expect("read");
     assert_eq!(tail.manifest, b"{\"manifest\":1}");
+    assert_eq!(tail.files, b"listed");
     assert_eq!(tail.entries.len(), 3);
     assert_eq!(written.blobs, 3);
     assert_eq!(written.dead_bytes, 0);
@@ -85,7 +86,7 @@ fn a_held_blob_is_not_written_twice() {
     let (object, written) = write(&[&a, &a], b"m", 0);
     assert_eq!(written.blobs, 1);
     assert_eq!(written.dead_bytes, 0);
-    assert_eq!(object.len(), 100 + 1 + ENTRY_LEN + TRAILER_LEN);
+    assert_eq!(object.len(), 100 + 1 + 6 + ENTRY_LEN + TRAILER_LEN);
 }
 
 #[test]
@@ -97,7 +98,7 @@ fn a_streamed_duplicate_is_dead_bytes_in_no_entry() {
     assert_eq!(written.dead_bytes, 100);
     assert_eq!(
         object.len(),
-        100 + 50 + 100 + 1 + 2 * ENTRY_LEN + TRAILER_LEN
+        100 + 50 + 100 + 1 + 6 + 2 * ENTRY_LEN + TRAILER_LEN
     );
     let tail = read(&object).expect("gaps are allowed");
     assert_eq!(tail.entries.len(), 2);
@@ -116,7 +117,7 @@ fn the_empty_blob_is_never_a_record() {
     assert!(!writer.blob(&empty, b"").expect("ok"));
     let at = writer.begin();
     assert!(!writer.end(at, &empty).expect("ok"));
-    let (object, written) = writer.finish(b"m").expect("finished");
+    let (object, written) = writer.finish(b"m", b"").expect("finished");
     assert_eq!(written.blobs, 0);
     assert!(read(&object).expect("read").entries.is_empty());
 }
@@ -171,7 +172,7 @@ fn a_sink_that_refuses_fails_every_step_of_the_writer() {
     let mut at = writer.begin();
     assert!(writer.chunk(&mut at, &a).is_err());
     let writer = ObjectWriter::new(Full { room: 0 });
-    assert!(writer.finish(b"m").is_err());
+    assert!(writer.finish(b"m", b"").is_err());
 }
 
 /// An object with one blob, as bytes to damage.
@@ -183,8 +184,8 @@ fn sample() -> Vec<u8> {
 /// Sets the trailer's own CRC to match its bytes, so a damaged field is the only fault.
 fn reseal(object: &mut [u8]) {
     let at = object.len() - TRAILER_LEN;
-    let crc = crc32c(&object[at..at + 48]);
-    object[at + 48..at + 52].copy_from_slice(&crc.to_le_bytes());
+    let crc = crc32c(&object[at..at + 52]);
+    object[at + 52..at + 56].copy_from_slice(&crc.to_le_bytes());
 }
 
 fn trailer_error(mut object: Vec<u8>, damage: impl FnOnce(&mut [u8])) -> ObjectError {
@@ -220,10 +221,6 @@ fn a_trailer_with_a_wrong_field_is_refused_for_that_field() {
         trailer_error(sample(), |t| t[41] = 1),
         ObjectError::ReservedNotZero
     );
-    assert_eq!(
-        trailer_error(sample(), |t| t[53] = 1),
-        ObjectError::ReservedNotZero
-    );
     let mut object = sample();
     let at = object.len() - n + 3;
     object[at] ^= 1;
@@ -233,16 +230,12 @@ fn a_trailer_with_a_wrong_field_is_refused_for_that_field() {
 #[test]
 fn offsets_that_do_not_add_up_to_the_object_are_refused() {
     let len = sample().len() as u64;
-    for (what, at) in [
-        ("manifest_len", 8),
-        ("index_offset", 16),
-        ("entry_count", 24),
-    ] {
+    for (what, at) in [("index_offset", 16), ("entry_count", 24)] {
         let error = trailer_error(sample(), |t| t[at] = t[at].wrapping_add(1));
         assert_eq!(error, ObjectError::Layout { actual: len }, "{what}");
     }
     // Sums that pass u64 are refused, not wrapped.
-    for at in [0, 16, 24] {
+    for at in [0, 8, 16, 24] {
         let error = trailer_error(sample(), |t| {
             t[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes())
         });
@@ -260,7 +253,10 @@ fn damaged_manifest_or_index_bytes_are_refused() {
     object[100] ^= 1; // the manifest's first byte
     assert_eq!(read(&object), Err(ObjectError::ManifestCrc));
     let mut object = sample();
-    object[100 + 8] ^= 1; // the index's first byte
+    object[108] ^= 1; // the first byte of the files, after the manifest
+    assert_eq!(read(&object), Err(ObjectError::FilesCrc));
+    let mut object = sample();
+    object[114] ^= 1; // the index's first byte
     assert_eq!(read(&object), Err(ObjectError::IndexCrc));
 }
 
@@ -300,8 +296,8 @@ fn forged(records: usize, entries: &[(Digest, u64)]) -> Vec<u8> {
     trailer[36..40].copy_from_slice(&crc32c(manifest).to_le_bytes());
     trailer[40] = 1;
     trailer[44..48].copy_from_slice(&1u32.to_le_bytes());
-    let crc = crc32c(&trailer[..48]);
-    trailer[48..52].copy_from_slice(&crc.to_le_bytes());
+    let crc = crc32c(&trailer[..52]);
+    trailer[52..56].copy_from_slice(&crc.to_le_bytes());
     trailer[56..64].copy_from_slice(&MAGIC);
     object.extend_from_slice(&trailer);
     object

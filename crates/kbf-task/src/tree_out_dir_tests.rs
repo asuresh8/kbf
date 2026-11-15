@@ -231,6 +231,18 @@ fn one_pass_cli(root: &Path, action: &Digest, out: &Path) -> Cli {
 /// The manifest and the entries of the one-pass object `object`, each record checked against
 /// its entry's CRC and digest.
 fn read_one_pass(object: &[u8]) -> (TaskManifest, Vec<kbf_segments::IndexEntry>) {
+    let (manifest, entries, _) = read_one_pass_files(object);
+    (manifest, entries)
+}
+
+/// [`read_one_pass`], and the neutral file index parsed.
+fn read_one_pass_files(
+    object: &[u8],
+) -> (
+    TaskManifest,
+    Vec<kbf_segments::IndexEntry>,
+    serde_json::Value,
+) {
     use kbf_task_pack::one_pass::{TRAILER_LEN, Tail, Trailer};
     let len = object.len() as u64;
     let trailer = Trailer::parse(&object[object.len() - TRAILER_LEN..], len).expect("trailer");
@@ -243,7 +255,8 @@ fn read_one_pass(object: &[u8]) -> (TaskManifest, Vec<kbf_segments::IndexEntry>)
             .expect("a record");
     }
     let manifest = TaskManifest::parse_with(&tail.manifest, MAX_LARGE_BYTES).expect("manifest");
-    (manifest, tail.entries)
+    let files = serde_json::from_slice(&tail.files).expect("the file index is JSON");
+    (manifest, tail.entries, files)
 }
 
 /// Asserts that `--object-format one-pass` commits `pack` alone, as one object whose trailer
@@ -286,11 +299,13 @@ async fn without_the_one_pass_format_the_pack_is_the_one_of_before() {
     for (name, extra) in [("default", None), ("packs", Some("--object-format=packs"))] {
         let (dir, digest) = copy_tree(&format!("one-pass-off-{name}"));
         let out = put_dir(&dir);
-        let mut cli = out_cli(&dir, &digest, &out);
-        if extra.is_some() {
-            let flag = out_flags(&out);
-            cli = flags(&dir, &digest, &[&flag[0], &flag[1], extra.expect("flag")]).expect("flags");
-        }
+        let cli = match extra {
+            None => out_cli(&dir, &digest, &out),
+            Some(extra) => {
+                let flag = out_flags(&out);
+                flags(&dir, &digest, &[&flag[0], &flag[1], extra]).expect("flags")
+            }
+        };
         assert_eq!(main_with(&cli).await, ExitCode::SUCCESS);
         let pack = std::fs::read(out.join("pack")).expect("pack");
         let manifest = read_manifest_with(&pack, MAX_LARGE_BYTES).expect("a segment pack");
@@ -330,8 +345,28 @@ async fn a_directory_of_equal_files_is_one_entry_per_blob_and_dead_bytes_for_a_r
         ExitCode::SUCCESS
     );
     let object = std::fs::read(out.join("pack")).expect("pack");
-    let (manifest, entries) = read_one_pass(&object);
+    let (manifest, entries, index) = read_one_pass_files(&object);
     assert_eq!(manifest.exit_code, 0);
+    // The neutral index names each file by its full path with its offset: the two equal large
+    // files share the offset of the one record, and the object holds their bytes there.
+    let at = |path: &str| {
+        let file = index["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .find(|f| f["path"] == path)
+            .unwrap_or_else(|| panic!("{path} is indexed"));
+        (
+            file["offset"].as_u64().expect("offset"),
+            file["size"].as_u64(),
+        )
+    };
+    assert_eq!(at("d/big"), at("d/copy"));
+    assert_eq!(at("d/a"), at("d/b"));
+    let (offset, _) = at("d/a");
+    assert_eq!(&object[offset as usize..offset as usize + 2], b"a\n");
+    assert_eq!(index["dirs"], serde_json::json!(["d"]));
+    assert_eq!(index["symlinks"], serde_json::json!([]));
     let zeros = sha256(&vec![0u8; 3_145_728]);
     assert_eq!(entries.iter().filter(|e| e.digest == zeros).count(), 1);
     let small = sha256(b"a\n");

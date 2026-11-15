@@ -269,10 +269,14 @@ impl OutDir {
             name: name.clone(),
             source,
         })?;
+        let read = part.clone();
         stage.parts.push(part);
         Ok(ObjectRun {
             stage,
-            spool: Spool::new(file),
+            spool: Spool::new(
+                file,
+                Box::new(move |offset, len| read_at(&read, offset, len)),
+            ),
         })
     }
 
@@ -375,16 +379,25 @@ impl ObjectRun<'_> {
             return Err(PackError::missing(&digest).into());
         }
         manifest.timing.walk_ms = Some(manifest.timing.pack_ms);
+        let files = spool.files(manifest).await.map_err(write_error(&name))?;
         let json = manifest
             .to_json_with(MAX_LARGE_BYTES)
             .map_err(PackError::from)?;
-        let ended = tokio::task::spawn_blocking(move || spool.finish(&json)).await;
+        let ended = tokio::task::spawn_blocking(move || spool.finish(&json, &files)).await;
         let written = ended
             .map_err(io::Error::other)
             .and_then(|done| done)
             .map_err(write_error(&name))?;
         stage.commit(&name, &written.object)
     }
+}
+
+/// `len` bytes at `offset` of the file at `path`.
+fn read_at(path: &Path, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt as _;
+    let mut bytes = vec![0; usize::try_from(len).map_err(io::Error::other)?];
+    std::fs::File::open(path)?.read_exact_at(&mut bytes, offset)?;
+    Ok(bytes)
 }
 
 /// `manifest` with every timing at the widest it can be written (`i64::MAX`), so its JSON is

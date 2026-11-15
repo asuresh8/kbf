@@ -216,6 +216,11 @@ impl HostWorker {
 
     /// Submits every waiting task the job service will take.
     pub(super) async fn launch(&mut self, ctx: &Ctx<'_>, now: Instant) {
+        // Once for the pass, not once for each task: the preparations begun on earlier passes
+        // get the runtime before they are looked at.
+        // Once for the pass, not once for each task: the preparations begun on earlier passes
+        // get the runtime before they are looked at.
+        tokio::task::yield_now().await;
         let waiting: Vec<_> = self
             .tasks
             .iter()
@@ -237,8 +242,12 @@ impl HostWorker {
                 self.late(ctx, lease, w.sent_job());
                 continue;
             };
+            // Only so many preparations run at once on a worker: the rest of its `Start`s wait,
+            // so the ones that began finish inside their window instead of all of them
+            // finishing after it. A task already preparing is never held back.
+            let begin = self.preparing_now() < ctx.cfg.prepare_concurrency;
             self.stamp(lease, Mark::Seen, at, ctx);
-            match self.submit(ctx, lease, &action, w, deadline).await {
+            match self.submit(ctx, lease, &action, w, deadline, begin).await {
                 Submitted::Wait(w) => self.set_stage(lease, Stage::Waiting(w)),
                 Submitted::Running(running) => {
                     self.stamp(lease, Mark::Posted, ctx.now(), ctx);
@@ -253,6 +262,15 @@ impl HostWorker {
                 }
             }
         }
+    }
+
+    /// How many of the worker's preparations are running now.
+    fn preparing_now(&self) -> usize {
+        self.tasks
+            .values()
+            .filter_map(|task| task.preparing.as_ref())
+            .filter(|handle| !handle.is_finished())
+            .count()
     }
 
     /// Drops a `Start` whose window ended: at once if no job of it may exist, else once the
@@ -300,26 +318,36 @@ impl HostWorker {
         lease: LeaseId,
         action: &Digest,
         booking: Booking,
+        begin: bool,
     ) -> Preparing {
         let begun = self
             .tasks
             .get_mut(&lease)
             .and_then(|task| task.preparing.take());
-        let mut handle = begun.unwrap_or_else(|| {
-            let (preparer, action) = (ctx.preparer(), action.clone());
-            let limit = preparer.cfg.prepare_limit;
-            tokio::spawn(async move {
-                let preparing = prepare(&preparer, lease, &action, booking);
-                tokio::time::timeout(limit, preparing)
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(Settled::Infra(format!(
-                            "the inputs of the run were not ready within {limit:?}"
-                        )))
-                    })
-            })
-        });
-        match tokio::time::timeout(ctx.cfg.poll, &mut handle).await {
+        let waits = begun.is_none();
+        let mut handle = match begun {
+            Some(handle) => handle,
+            None if !begin => return Preparing::Pending,
+            None => {
+                let (preparer, action) = (ctx.preparer(), action.clone());
+                let limit = preparer.cfg.prepare_limit;
+                tokio::spawn(async move {
+                    let preparing = prepare(&preparer, lease, &action, booking);
+                    tokio::time::timeout(limit, preparing)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(Settled::Infra(format!(
+                                "the inputs of the run were not ready within {limit:?}"
+                            )))
+                        })
+                })
+            }
+        };
+        // One just begun is given a poll to finish; one begun on an earlier pass is only
+        // looked at: a pass that waited a poll for each of a worker's tasks held its intake,
+        // its reads and its heartbeat for as many polls as it had tasks.
+        let wait = if waits { ctx.cfg.poll } else { Duration::ZERO };
+        match tokio::time::timeout(wait, &mut handle).await {
             Err(_) => {
                 self.tasks
                     .entry(lease)
@@ -341,6 +369,7 @@ impl HostWorker {
         action: &Digest,
         w: Waiting,
         deadline: Instant,
+        begin: bool,
     ) -> Submitted {
         // What preparing reads (the CAS, the store, the grant service) is not the job
         // service's, and it can take longer than the window: a tree of many files is
@@ -349,7 +378,7 @@ impl HostWorker {
         // one slow preparation must not hold the heartbeats and the starts of the rest.
         let prepared = match &w.prepared {
             Some(prepared) => Arc::clone(prepared),
-            None => match self.preparing(ctx, lease, action, w.booking).await {
+            None => match self.preparing(ctx, lease, action, w.booking, begin).await {
                 Preparing::Ready(prepared) => {
                     self.stamp(lease, Mark::Prepared, ctx.now(), ctx);
                     prepared

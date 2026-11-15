@@ -119,6 +119,11 @@ pub struct Config {
     /// which only the submit must meet: it goes on until this ends, so a tree published by a
     /// run whose window passed is there for the run the farm starts next.
     pub prepare_limit: Duration,
+    /// How many of one worker's preparations run at once. A worker the farm gave a full set of
+    /// `Start`s at one instant prepared them all together, each slowed by the rest until none
+    /// was ready inside the window; the `Start`s past this wait their turn, and are dropped
+    /// at their window, unprepared, only if their turn did not come.
+    pub prepare_concurrency: usize,
     /// T: how long a worker goes on with its jobs after the farm last acknowledged a
     /// heartbeat, or the job service last answered a call about a job it holds, before it
     /// cancels them and goes silent.
@@ -241,6 +246,7 @@ impl Config {
             call_timeout: Duration::from_secs(5),
             pass_budget: Duration::from_secs(10),
             prepare_limit: Duration::from_secs(300),
+            prepare_concurrency: 4,
             fence_after: SELF_FENCE,
             delivery: Delivery::InsecureArgv,
             insecure_argv_secrets: false,
@@ -329,7 +335,8 @@ impl Config {
                 !self.call_timeout.is_zero()
                     && self.call_timeout < self.fence_after
                     && !self.pass_budget.is_zero()
-                    && !self.prepare_limit.is_zero(),
+                    && !self.prepare_limit.is_zero()
+                    && self.prepare_concurrency > 0,
                 ConfigError::Bounds,
             ),
             (

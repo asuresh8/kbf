@@ -672,6 +672,7 @@ fn a_put_dir_needs_only_the_secret_file_and_the_root() {
     let mut given = PUT_DIR_ONLY.to_vec();
     given.extend([
         "--task-url-slack-secs=5",
+        "--task-put-retry-secs=90",
         "--task-closure-max-digests=10",
         "--task-closure-max-bytes=1024",
     ]);

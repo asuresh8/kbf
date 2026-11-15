@@ -164,12 +164,11 @@ async fn a_503_past_the_total_fails_with_the_stores_answer() {
             FIRST_WAIT,
             FIRST_WAIT * 2,
             FIRST_WAIT * 4,
-            FIRST_WAIT * 8,
             Duration::from_millis(1500)
         ]
     );
     assert_eq!(waits.iter().sum::<Duration>(), Duration::from_secs(5));
-    assert_eq!(rig.farm.puts_of(&key["cas/l/".len()..]), 6);
+    assert_eq!(rig.farm.puts_of(&key["cas/l/".len()..]), 5);
     assert_eq!(rig.farm.object(&key), None);
 }
 

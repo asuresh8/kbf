@@ -189,11 +189,21 @@ failure, and the farm runs the action again. A worker that has not had a heartbe
 answer from the job service while it holds a job, for the fence time cancels all its jobs and
 falls silent until the farm has requeued them.
 
-**What an action's Command sees in its job.** The task tool starts the Command in mount and PID
-namespaces of its own (`crates/kbf-task/src/sandbox.rs`), made by the same `unshare` as its user
-and network namespaces. The job's files at `/run/js-files` (the read token and the write URLs of
-`--executor-secret-delivery files`) and the parent of the tool's work directory (`/scratch`, which
-holds the input root, the run's `private/` directory and the captured stdout and stderr) are
+**What an action's Command sees in its job.** In a put-dir job (`--tree`, the farm's) the task tool
+makes no sandbox of its own, since the job is one (its own user namespace, no network, a layered
+root; owner decision of 2026-11-15, `docs/design/actions-as-jobs.md` 4.4, D7): it starts the Command
+directly. The Command sees the job's root as it is, with `/run/js-files` empty (a put-dir job has no
+URL, no grant and no secret), the run's `/.kbf-run` (its streams and `private/`) and the put
+directory `/out`, which is writable (it is the job's own output path). The task ends the Command's
+process group when it exits or the timeout passes, and is the subreaper that kills and reaps every
+process it left, `setsid` included, before the outputs are read. The job log has no sandbox or
+network line for it: nothing is made, so nothing is unusual.
+
+Today's job (the grant mode, without `--tree`) keeps its sandbox. The task tool starts the Command
+in mount and PID namespaces of its own (`crates/kbf-task/src/sandbox.rs`), made by the same `unshare`
+as its user and network namespaces. The job's files at `/run/js-files` (the read token and the write
+URLs of `--executor-secret-delivery files`) and the parent of the tool's work directory (`/scratch`,
+which holds the input root, the run's `private/` directory and the captured stdout and stderr) are
 covered by an empty read-only tmpfs, with the input root and `private/` bound again at their own
 paths, so the Command's working directory and its `HOME`, `TMPDIR` and cache variables still name
 them. `/tmp`, `/var/tmp`, `/run` and `/root` are the run's own `private/tmp`, `private/var-tmp`,

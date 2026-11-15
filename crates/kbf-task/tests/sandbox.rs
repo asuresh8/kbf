@@ -84,6 +84,7 @@ impl Rig {
                 relay: self
                     .relayed
                     .then(|| Path::new(env!("CARGO_BIN_EXE_kbf-task"))),
+                job: None,
             },
         )
         .await
@@ -342,6 +343,7 @@ async fn a_program_the_relay_cannot_start_is_a_start_error() {
             unreadable: &[],
             hidden: &[],
             relay: Some(Path::new(env!("CARGO_BIN_EXE_kbf-task"))),
+            job: None,
         },
     )
     .await
@@ -381,6 +383,7 @@ async fn a_relay_that_cannot_be_executed_is_named_as_the_relay() {
             unreadable: &[],
             hidden: &[],
             relay: Some(Path::new("/no/such/kbf-task")),
+            job: None,
         },
     )
     .await

@@ -113,7 +113,7 @@ const MAX_SECS: u64 = kbf_front::prepare_run::MAX_EXPIRY.as_secs();
 const MAX_FILE_BYTES: usize = 4096;
 
 /// The twenty flags.
-pub(super) fn args() -> [Arg; 20] {
+pub(super) fn args() -> [Arg; 21] {
     [
         Arg::new(SECRET)
             .long("task-secret-file")

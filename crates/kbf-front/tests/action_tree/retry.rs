@@ -226,7 +226,7 @@ async fn other_failures_are_not_repeated() {
     rig.farm
         .state()
         .wrong
-        .insert(blob, Bytes::from_static(b"other bytes of the length!"));
+        .insert(blob, Bytes::from_static(b"other bytes of the nodes"));
     let root = root_of_one(&rig, &blob).await;
     rig.farm.state().reads.clear();
     let failed = rig.write(&root).await.expect_err("no tree");

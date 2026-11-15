@@ -183,4 +183,22 @@ Additive: a new object kind under the same key, a new flag, no field of any ship
 
 ## 8. Measured
 
-See section 9 of the pull request; numbers are repeated here once measured.
+A Command writes `big` (170 MiB of random bytes) and `d/f0..f1999` (1,000 to 2,999 bytes each), outputs `big` and `d`, run
+through `kbf_task::tree::execute_out_dir` with a plain directory as the put directory, release build, one Linux host,
+page cache warm, three runs of each format (a throwaway harness, not committed). Bytes read are `rchar` of
+`/proc/self/io` around the call; it also counts the reaped Command's own reads (170 MiB of `/dev/urandom` and about 36 MiB
+for the shell and the 2,000 `head` runs), which are the same for both formats.
+
+| | `--object-format` default (packs) | `one-pass` |
+|---|---|---|
+| bytes read (rchar, 3 runs identical) | 545.5 MiB | 375.6 MiB |
+| of which the outputs | 2 x 170 MiB + small files | 1 x 170 MiB + small files |
+| objects written | `pack` + `L0` (the 170 MiB file is a large object) | `pack` |
+| task wall minus Command wall (ms, 3 runs) | 267, 281, 284 | 250, 238, 239 |
+| object bytes | 182,680,914 | 182,952,316 (the file index and the 2,001 entries' offsets) |
+
+The difference in bytes read is 169.9 MiB, one read of the large file. The wall time is 12% lower with a warm cache; a cold
+cache pays the second read in disk time. The output phase is 0.24 s of a 3.9 s task here, so the gain is small for this
+Command and grows with output size. Found on the way: in the packs format a large file inside an output *directory* is
+refused (`large slot 0 holds ..., which no output names`); the one-pass object has no such case, since a large blob is a
+record like any other.

@@ -410,7 +410,7 @@ fn become_subreaper() -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn reap_descendants() {
     use rustix::io::Errno;
-    use rustix::process::{Pid, Signal, WaitOptions, kill_process, waitpid};
+    use rustix::process::{Signal, WaitOptions, kill_process, waitpid};
     loop {
         let children = own_children();
         for pid in &children {

@@ -73,11 +73,37 @@ pub enum RunError {
     #[error("cannot confine the Command: {0}")]
     Confine(String),
     /// The program could not be started.
-    #[error("cannot start {program}: {source}")]
+    #[error("cannot start {stage} {program}: {source}")]
     Spawn {
+        stage: Stage,
         program: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// The process that could not start what it was to, as the start report names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// The tool could not execute the relay (this binary).
+    Relay,
+    /// The relay could not start the namespace's first process (this binary again).
+    Init,
+    /// The first process could not make itself ready to start the Command.
+    InitSetup,
+    /// The Command could not be started, by the first process or, with no PID namespace, by
+    /// the relay.
+    Command,
+}
+
+impl std::fmt::Display for Stage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Stage::Relay => "the relay",
+            Stage::Init => "the sandbox's first process",
+            Stage::InitSetup => "the sandbox's first process (its setup)",
+            Stage::Command => "the Command",
+        })
+    }
 }
 
 /// How a run ended.
@@ -195,15 +221,25 @@ pub async fn run(command: &Command, run: &Run<'_>) -> Result<Ran, RunError> {
 
     let cpu_before = children_usage().cpu_us;
     let clock = Instant::now();
+    // What an error names: the Command by its path, the relay and the first process (this
+    // binary, which the relay starts again) by the relay's.
     let started_as = launch.name(&program);
-    let spawn_error = |source| RunError::Spawn {
-        program: started_as.clone(),
+    let spawn_error = |stage, source| RunError::Spawn {
+        stage,
+        program: match stage {
+            Stage::Command => started_as.clone(),
+            Stage::Relay | Stage::Init | Stage::InitSetup => started.program.clone(),
+        },
         source,
     };
-    let mut child = process.spawn().map_err(|source| RunError::Spawn {
-        program: started.name(&program),
-        source,
-    })?;
+    let first = if relayed {
+        Stage::Relay
+    } else {
+        Stage::Command
+    };
+    let mut child = process
+        .spawn()
+        .map_err(|source| spawn_error(first, source))?;
     // Taken before the wait: the pid is also the id of the group the child leads. The group is
     // killed however this function is left, a dropped future included: `kill_on_drop` ends the
     // child alone, which in a PID namespace is the relay, and the processes it made may not yet
@@ -213,8 +249,8 @@ pub async fn run(command: &Command, run: &Run<'_>) -> Result<Ran, RunError> {
     // The builder holds write ends of the report pipe; the report is read to its end.
     drop(process);
     let (layers, sandbox, refused) = confinement.read();
-    if let Some(errno) = refused {
-        return Err(spawn_error(std::io::Error::from_raw_os_error(errno)));
+    if let Some((stage, errno)) = refused {
+        return Err(spawn_error(stage, std::io::Error::from_raw_os_error(errno)));
     }
     let waited = tokio::time::timeout(run.deadline, child.wait()).await;
     let (status, timed_out) = if let Ok(status) = waited {
@@ -225,7 +261,7 @@ pub async fn run(command: &Command, run: &Run<'_>) -> Result<Ran, RunError> {
     };
     // Whatever the program left running in its group is ended with it.
     ends_group.now();
-    let status = status.map_err(spawn_error)?;
+    let status = status.map_err(|source| spawn_error(Stage::Command, source))?;
     let wall_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
     let usage = children_usage();
     let exit_code = if timed_out {
@@ -921,6 +957,13 @@ mod tests {
         } else {
             let error = result.expect_err("refused");
             assert!(matches!(error, RunError::Spawn { .. }), "{error}");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "cannot start the Command {}: No such file or directory (os error 2)",
+                    rig.root().join("./no-such-program").display()
+                )
+            );
         }
     }
 }

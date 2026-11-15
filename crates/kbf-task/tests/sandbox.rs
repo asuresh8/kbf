@@ -347,12 +347,48 @@ async fn a_program_the_relay_cannot_start_is_a_start_error() {
     .await
     .expect_err("a missing program does not run");
     match error {
-        kbf_task::run::RunError::Spawn { program, source } => {
+        kbf_task::run::RunError::Spawn {
+            stage,
+            program,
+            source,
+        } => {
+            assert_eq!(stage, kbf_task::run::Stage::Command);
             assert_eq!(source.raw_os_error(), Some(libc::ENOENT), "{source}");
             assert_eq!(program, root.join("no-such-program"));
         }
         other => panic!("{other}"),
     }
+}
+
+/// Catches a relay that cannot be executed being reported as the Command that did not start: the
+/// error names the relay, its path and `ENOENT`, not the Command's path.
+#[tokio::test]
+async fn a_relay_that_cannot_be_executed_is_named_as_the_relay() {
+    let rig = Rig::new("norelay");
+    let root = rig.root();
+    let error = run(
+        &Command {
+            arguments: vec!["./a-program".into()],
+            ..Command::default()
+        },
+        &Run {
+            root: &root,
+            private: &rig.private(),
+            stdout: &rig.scratch.join("stdout"),
+            stderr: &rig.scratch.join("stderr"),
+            deadline: Duration::from_secs(60),
+            network: Network::Denied,
+            unreadable: &[],
+            hidden: &[],
+            relay: Some(Path::new("/no/such/kbf-task")),
+        },
+    )
+    .await
+    .expect_err("no relay, no run");
+    assert_eq!(
+        error.to_string(),
+        "cannot start the relay /no/such/kbf-task: No such file or directory (os error 2)"
+    );
 }
 
 /// A process a Command left, killed when dropped.

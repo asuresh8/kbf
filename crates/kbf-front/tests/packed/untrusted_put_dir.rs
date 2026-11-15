@@ -1250,3 +1250,17 @@ async fn the_tail_bounds_are_the_limits_the_ingest_is_given() {
         .await;
     assert!(matches!(farm.run().await, Ingested::Ran { .. }));
 }
+
+/// Asserts that a run with no output at all (a Command that wrote nothing it declared) is
+/// ingested with no file index to check, and its result is cached.
+#[tokio::test]
+async fn a_one_pass_object_with_no_outputs_has_no_index_to_agree_with() {
+    let farm = PutDir::new().await;
+    let mut manifest = farm.one_object_manifest();
+    manifest.stdout = None;
+    manifest.output_files.clear();
+    manifest.output_directories.clear();
+    farm.put(Slot::Pack(0), &one_pass_of(&manifest, &[])).await;
+    let got = farm.run().await;
+    assert!(matches!(got, Ingested::Ran { cached: true, .. }), "{got:?}");
+}

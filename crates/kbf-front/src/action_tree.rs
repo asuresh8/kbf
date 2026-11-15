@@ -345,15 +345,8 @@ impl TreeWriter {
         let now = (self.clock)();
         let plan = self.plan_of(root, &|digest| directories.get(digest), now)?;
         let measures = measure(&plan, now);
-        let top = measures[root];
-        if top.entries > MAX_ENTRIES {
-            return Err(NoTree::TooManyEntries {
-                entries: top.entries,
-            });
-        }
-        if top.height > MAX_DEPTH {
-            return Err(NoTree::TooDeep { depth: top.height });
-        }
+        // The limits of a whole action tree are applied when one is written ([`TreeWriter::write`]),
+        // which counts this directory again with the base's.
         // Every file of the directories is a record of the object: the ingest checks the index's
         // digests against the object's before it publishes.
         let places: BTreeMap<Digest, Place> = (spans.iter())

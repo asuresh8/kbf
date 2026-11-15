@@ -125,7 +125,11 @@ impl<'a> Large<'a> {
     /// and nothing is kept under its digest; `Incomplete` if the object is gone; `Unavailable` if
     /// the object store or the CAS failed.
     pub(super) async fn store(&self, backend: &Backend) -> Step<()> {
-        let open = || self.open();
+        // A backend that writes `cas/l/<sha256>` itself (a frontend with no storage node) is that
+        // write: a second PUT of the key beside it, fed from the same read, is a duplicate that
+        // the first PUT's body waits on.
+        let through = !backend.writes_large_object_itself();
+        let open = || self.open(through);
         let stored = backend.put_streamed(&self.digest, &open).await;
         let wrote = locked(&self.pass).wrote.take();
         if let Some(mut wrote) = wrote {
@@ -145,6 +149,9 @@ impl<'a> Large<'a> {
             }
             (Some(Ended::Read(_)), _) => Err(RejectReason::HashMismatch.into()),
             (Some(Ended::Stopped(stop)), _) => Err(stop),
+            // The CAS held the blob already (the index has it, or its object is there whole) and
+            // read nothing: there is nothing to check and nothing to copy.
+            (None, Ok(())) => Ok(()),
             (None, stored) => Err(unavailable(&format!(
                 "the CAS took no bytes of {}: {stored:?}",
                 self.object
@@ -152,9 +159,10 @@ impl<'a> Large<'a> {
         }
     }
 
-    /// The pieces of the object from its first byte. Starts the pass over.
-    fn open(&self) -> PieceStream {
-        let (tee, wrote) = self.copy().unzip();
+    /// The pieces of the object from its first byte. Starts the pass over, with the write-through
+    /// if `through`.
+    fn open(&self, through: bool) -> PieceStream {
+        let (tee, wrote) = through.then(|| self.copy()).flatten().unzip();
         *locked(&self.pass) = Pass {
             wrote,
             ..Pass::default()

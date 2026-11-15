@@ -90,6 +90,12 @@ trait Plane: Send + Sync {
     }
     /// The packs a plane keeps its client uploads in, if it has any.
     fn packs(&self) -> Option<&Packs>;
+    /// Whether [`Plane::put_streamed`] of a large blob writes the object `cas/l/<sha256>` in the
+    /// packs' object store itself (a plane with no storage node does), so that a second write of
+    /// that key beside it is a duplicate of it.
+    fn writes_large_object_itself(&self) -> bool {
+        false
+    }
     fn action_result<'a>(
         &'a self,
         action: &'a Digest,
@@ -292,6 +298,14 @@ impl Backend {
 
     pub(crate) async fn walk_inputs(&self, root: Digest) -> Result<Walked, StorageError> {
         self.0.walk_inputs(root).await
+    }
+
+    /// Whether [`Backend::put_streamed`] writes a large blob to `cas/l/<sha256>` in the packs'
+    /// object store itself, which is the case for a frontend with no storage node. The ingest
+    /// then writes no second copy of the key beside it.
+    #[must_use]
+    pub fn writes_large_object_itself(&self) -> bool {
+        self.0.writes_large_object_itself()
     }
 
     /// Stores the blob `digest` from the pieces `open` gives, a piece at a time and never held

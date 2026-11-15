@@ -628,6 +628,18 @@ impl Ingest<'_> {
         if files.iter().any(|digest| !places.contains_key(digest)) {
             return Err(RejectReason::Incomplete.into());
         }
+        // A large object is an output's, or a file of an output directory's tree (the manifest
+        // cannot see inside a tree, so it does not check this): one that is neither would be
+        // streamed into the store for nothing.
+        let inside: BTreeSet<Digest> = files.iter().copied().collect();
+        let named: BTreeSet<Digest> = manifest.output_digests().collect();
+        if manifest
+            .large
+            .iter()
+            .any(|large| !named.contains(&large.digest) && !inside.contains(&large.digest))
+        {
+            return Err(RejectReason::BadManifest.into());
+        }
         Ok(())
     }
 

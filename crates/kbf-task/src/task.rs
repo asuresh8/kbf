@@ -52,7 +52,7 @@ use crate::put::{
     put_reader, put_retrying, tls_config,
 };
 use crate::put_urls::PutUrls;
-use crate::run::{Run, RunError, output_paths, run};
+use crate::run::{Job, Run, RunError, output_paths, run};
 use crate::sandbox;
 use crate::spool::{self, ObjectFormat, Spool};
 
@@ -275,6 +275,12 @@ pub struct Cli {
     /// has none, and its Command gets no PID namespace.
     #[arg(skip)]
     pub relay: Option<PathBuf>,
+    /// Not a flag: in a tree job (`--tree`), which runs its Command directly, make this process
+    /// the subreaper of what the Command leaves, and end and reap it all ([`crate::run::Job`]).
+    /// The binary's own start sets it ([`run_cli_with`]); a task run in another process (a test)
+    /// has none, and only the Command's process group is ended.
+    #[arg(skip)]
+    pub subreaper: bool,
 }
 
 impl Cli {
@@ -521,6 +527,16 @@ pub(crate) async fn complete(
     Ok(manifest)
 }
 
+/// How the Command is run: in a tree job, which runs in a job that is its sandbox, directly
+/// ([`Job`]: its group is ended, and with `Cli::subreaper` every process it left); else in the sandbox.
+pub(crate) fn job_of(cli: &Cli) -> Option<Job> {
+    cli.tree.is_some().then_some(if cli.subreaper {
+        Job::Subreaper
+    } else {
+        Job::Group
+    })
+}
+
 /// Runs the Command and collects its outputs, within what `limits` can store: the manifest
 /// (`pack_ms` the time the outputs took to collect, one pack and no large object yet) and the
 /// blobs, for a sink to place and store.
@@ -566,6 +582,7 @@ pub(crate) async fn collected_into(
             unreadable: &unreadable,
             hidden: &hidden,
             relay: cli.relay.as_deref(),
+            job: job_of(cli),
         },
     )
     .await?;
@@ -573,7 +590,8 @@ pub(crate) async fn collected_into(
     sandbox::notice(&cli.action, &ran.sandbox)
         .into_iter()
         .for_each(|line| eprintln!("{line}"));
-    if network != network::Network::Allowed {
+    // Nothing is said of a job's Command: no layer is made, and nothing is unusual.
+    if network != network::Network::Allowed && ran.layers != network::Layers::Job {
         eprintln!("{}", network::layers_notice(&cli.action, &ran.layers));
     }
 
@@ -927,7 +945,11 @@ pub(crate) fn exit_code(outcome: Result<TaskManifest, Failure>) -> ExitCode {
 /// rather than run with the Command able to take its sockets.
 pub fn run_cli_with(protection: std::io::Result<()>, cli: &Cli) -> ExitCode {
     match protection {
-        Ok(()) => run_cli(&relayed(cli)),
+        Ok(()) => {
+            let mut cli = relayed(cli);
+            cli.subreaper = true;
+            run_cli(&cli)
+        }
         Err(e) => {
             eprintln!("kbf-task: cannot make this process non-dumpable: {e}");
             ExitCode::from(EXIT_SETUP)

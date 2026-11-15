@@ -17,21 +17,20 @@
 //! the Command's `stdout`, `stderr` and `private/` (its `HOME`, `TMPDIR` and caches) are there,
 //! outside `work`, so nothing written there is an output. Then the run is today's: the working
 //! directory and the parent of every output path are made under `work` before the Command
-//! starts, the Command runs in the same confinement and sandbox ([`crate::sandbox`]), which here
-//! hides the job's grants (`/run/js-files`) and `.kbf-run` (its `private/` bound again) rather
-//! than the parent of `--work-dir`, its outputs are collected from `work`, and
+//! starts, the Command is started directly in the job, which is its sandbox (no namespace, filter,
+//! cover or relay of the task's: [`crate::run::Job`]), its outputs are collected from `work`, and
 //! the manifest and outputs are stored through the same sink. The manifest's advisory `inputs`
 //! is `{"from":"tree"}` with every number 0 (nothing was fetched), which makes it version 2.
 //!
 //! With `--stage-and-commit` there is no sink: the packs and large objects are written into the
-//! put directory `--out-dir` and committed there ([`crate::out_dir`]), which the sandbox also
-//! hides from the Command. `--out-dir` must be a directory before anything is read (exit 14).
+//! put directory `--out-dir` and committed there ([`crate::out_dir`]), which the Command
+//! can see (the job's own output path). `--out-dir` must be a directory before anything is read (exit 14).
 //!
 //! A failure to read the Action, the Command or `work` is exit 10, as a fetch failure is; a run
 //! directory that cannot be made is exit 11, as the private directories are.
 
 use std::os::unix::fs::DirBuilderExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -44,7 +43,6 @@ use crate::inputs::{Inputs, network_of};
 use crate::out_dir::OutDir;
 use crate::plan::Limits;
 use crate::run::RunError;
-use crate::sandbox::GRANTS_DIR;
 use crate::spool::ObjectFormat;
 use crate::task::{
     Cli, Failure, HttpSink, PackSink, check_argv_secrets, check_lease, check_slots, collected,
@@ -109,19 +107,13 @@ fn read(cli: &Cli, root: &Path) -> Result<Inputs, Failure> {
                 format!("cannot make the run directory (an existing one is refused): {e}"),
             ),
         })?;
-    // The job's grants and the task's run directory, out of the Command's sight (its `private/`
-    // is bound again by the sandbox); and the put directory, which only the task writes, once
-    // the Command has ended.
-    let mut hidden = vec![PathBuf::from(GRANTS_DIR), run_dir.clone()];
-    if cli.stage_and_commit {
-        hidden.push(cli.out_dir().to_owned());
-    }
     Ok(Inputs {
         action,
         command,
         network,
         root: work,
-        hidden,
+        // Nothing is hidden: the Command is started directly, in the job (`Run::job`).
+        hidden: Vec::new(),
         run_dir,
         fetch_ms: millis(reading.elapsed()),
         stats: Some(input_stats()),

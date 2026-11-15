@@ -3,6 +3,7 @@
 use std::os::unix::fs::PermissionsExt;
 
 use kbf_proto::reapi::{ActionResult, Digest as WireDigest, Tree};
+use kbf_testkit::dir::TestDir;
 use prost::Message as _;
 
 use super::*;
@@ -68,8 +69,8 @@ fn sample() -> Vec<u8> {
 
 #[test]
 fn the_tree_derived_is_the_one_kbf_outputs_builds_from_the_directory() {
-    let dir = std::env::temp_dir().join(format!("kbf-front-output-index-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = TestDir::under(std::env::temp_dir(), "kbf-front-output-index");
+    let dir = scratch.to_path_buf();
     for (path, bytes) in [
         ("d/b", &b"bee"[..]),
         ("d/e", b""),
@@ -144,7 +145,6 @@ fn the_tree_derived_is_the_one_kbf_outputs_builds_from_the_directory() {
     );
     // The root, `sub`, `sub/deep`, `sub/none` and `sub2`.
     assert_eq!(derived.directories.len(), 5);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

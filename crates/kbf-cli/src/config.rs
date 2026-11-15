@@ -321,6 +321,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "executor-locate",
             "executor-max-run-secs",
             "executor-network",
+            "executor-prepare-concurrency",
             "executor-prepare-limit-secs",
             "executor-run-margin-secs",
             "executor-secret-delivery",

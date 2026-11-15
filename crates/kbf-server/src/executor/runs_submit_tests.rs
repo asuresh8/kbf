@@ -207,6 +207,8 @@ struct Gate {
     release: Notify,
     done: Notify,
     finished: AtomicUsize,
+    /// The reads that began, ended or not.
+    begun: AtomicUsize,
     panics: bool,
 }
 
@@ -216,6 +218,7 @@ impl Gate {
             release: Notify::new(),
             done: Notify::new(),
             finished: AtomicUsize::new(0),
+            begun: AtomicUsize::new(0),
             panics,
         })
     }
@@ -224,6 +227,7 @@ impl Gate {
 #[tonic::async_trait]
 impl Inputs for Arc<Gate> {
     async fn action(&self, _: &Digest) -> Result<ActionFacts, InputsError> {
+        self.begun.fetch_add(1, Ordering::SeqCst);
         self.release.notified().await;
         assert!(!self.panics, "the read of the action failed hard");
         self.finished.fetch_add(1, Ordering::SeqCst);
@@ -344,4 +348,32 @@ async fn a_preparation_that_panics_is_an_infrastructure_failure() {
         message.starts_with("the preparation of the run ended without an answer"),
         "{message}"
     );
+}
+
+/// Asserts that a worker prepares only `prepare_concurrency` of its runs at once, and that the
+/// ones past it begin as the ones before them end: five `Start`s given at one instant begin two
+/// preparations; when one is done its job is submitted and the next `Start` begins its own, so
+/// the preparations that began are finished inside the window, in the order the `Start`s came.
+/// Catches every `Start` of a full set preparing together, each slowed by the rest until none
+/// is ready before the window ends (the farm's three first sets of 48 `Start`s were all dropped).
+#[tokio::test(start_paused = true)]
+async fn a_worker_prepares_only_so_many_runs_at_once() {
+    let mut harness = Harness::new().await;
+    harness.cfg.prepare_concurrency = 2;
+    let (mut worker, messages) = harness.worker();
+    let gate = Gate::new(false);
+    harness.deps.inputs = Arc::new(Arc::clone(&gate));
+    for seq in 1..=5 {
+        tell_start(&messages, start(1, seq));
+    }
+    step_ticking(&harness, &mut worker).await;
+    assert_eq!(gate.begun.load(Ordering::SeqCst), 2);
+    assert_eq!(submitted_specs(&harness).len(), 0);
+    gate.release.notify_one();
+    gate.done.notified().await;
+    tokio::task::yield_now().await;
+    step_ticking(&harness, &mut worker).await;
+    assert_eq!(submitted_specs(&harness).len(), 1);
+    assert_eq!(gate.begun.load(Ordering::SeqCst), 3);
+    assert_eq!(counted(&harness, "kbf_executor_late_starts_total"), 0);
 }

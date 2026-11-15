@@ -221,6 +221,7 @@ fn js_agent_settings_become_the_executors_config() {
         "--executor-default-timeout-secs=900",
         "--executor-call-timeout-secs=3",
         "--executor-prepare-limit-secs=45",
+        "--executor-prepare-concurrency=3",
         "--executor-failed-stderr-log-bytes=2048",
     ])
     .expect("flags");
@@ -247,6 +248,7 @@ fn js_agent_settings_become_the_executors_config() {
     assert_eq!(config.default_timeout, Duration::from_secs(900));
     assert_eq!(config.call_timeout, Duration::from_secs(3));
     assert_eq!(config.prepare_limit, Duration::from_secs(45));
+    assert_eq!(config.prepare_concurrency, 3);
     assert_eq!(config.failed_stderr_log_bytes, 2048);
 }
 
@@ -295,6 +297,7 @@ fn the_defaults_are_the_executors_own() {
     assert_eq!(config.default_timeout, own.default_timeout);
     assert_eq!(config.call_timeout, own.call_timeout);
     assert_eq!(config.prepare_limit, own.prepare_limit);
+    assert_eq!(config.prepare_concurrency, own.prepare_concurrency);
     assert_eq!(config.failed_stderr_log_bytes, own.failed_stderr_log_bytes);
     assert_eq!(own.delivery, config.delivery);
     assert_eq!(config.network, own.network);

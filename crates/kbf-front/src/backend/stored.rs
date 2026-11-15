@@ -5,9 +5,10 @@
 //!
 //! The action-cache write has one half here. [`Stored::put_action_result`] checks the closure
 //! and stores the encoded result inline in the row of the action (there is no result blob to
-//! store first), so a prepared [`ActionRecord`] has nothing to commit: [`Plane::prepare_action_result`]
+//! store first), so a prepared [`ActionRecord`] alone has nothing to commit: [`Plane::prepare_action_result`]
 //! answers the check, and [`Plane::commit_action_record`] is refused. A caller that writes a
-//! result uses [`Plane::put_action_result`].
+//! result uses [`Plane::put_action_result`], or, having checked it already,
+//! [`Plane::commit_prepared`], which is handed the result beside its record.
 
 use std::sync::Arc;
 
@@ -140,6 +141,15 @@ impl Plane for StoredPlane {
              (put_action_result): a prepared record names a result blob it does not store"
                 .to_owned(),
         ))))
+    }
+
+    fn commit_prepared<'a>(
+        &'a self,
+        action: Digest,
+        record: ActionRecord,
+        result: &'a ActionResult,
+    ) -> BoxFuture<'a, Answer<()>> {
+        Box::pin(self.stored.commit_prepared(action, record, result))
     }
 
     fn put_action_result<'a>(

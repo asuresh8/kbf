@@ -109,6 +109,18 @@ trait Plane: Send + Sync {
         action: Digest,
         record: ActionRecord,
     ) -> BoxFuture<'_, Answer<()>>;
+    /// The second half for a result the first half checked: `record` is what
+    /// [`Plane::prepare_action_result`] answered for `result`. A store that keeps the record
+    /// and the result apart commits the record; one that keeps the result in the row of the
+    /// action (no storage node) writes `result`, which is why it is handed it.
+    fn commit_prepared<'a>(
+        &'a self,
+        action: Digest,
+        record: ActionRecord,
+        _result: &'a ActionResult,
+    ) -> BoxFuture<'a, Answer<()>> {
+        self.commit_action_record(action, record)
+    }
     /// A result written whole: the two halves of the action-cache write, as a store that
     /// can do them apart does them.
     fn put_action_result<'a>(
@@ -280,6 +292,23 @@ impl Backend {
         record: ActionRecord,
     ) -> Result<(), StorageError> {
         self.0.commit_action_record(action, record).await
+    }
+
+    /// The second half for a result the first half checked ([`Backend::prepare_action_result`]
+    /// answered `record` for `result`): the entry of `action` is written without the check
+    /// being made again. A store with no storage node holds the result in the row of the
+    /// action, so it is the one that needs `result` and takes the write only this way.
+    ///
+    /// # Errors
+    /// As [`Backend::commit_action_record`] answers; a `record` that is not the one of `result`
+    /// is [`StorageError::Invalid`] where the result is the row.
+    pub async fn commit_prepared(
+        &self,
+        action: Digest,
+        record: ActionRecord,
+        result: &ActionResult,
+    ) -> Result<(), StorageError> {
+        self.0.commit_prepared(action, record, result).await
     }
 
     /// Writes `result` as the action-cache entry of `action`: both halves of the write, the

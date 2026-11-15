@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use kbf_segments::sha256;
-use kbf_task_pack::one_pass::{TRAILER_LEN, Tail, Trailer};
+use kbf_task_pack::one_pass::{TAIL_LEN, Tail, Trailer};
 
 use prost::Message as _;
 
@@ -39,9 +39,9 @@ impl Write for Refusing {
 }
 
 /// The entries of the finished object `bytes`.
-fn entries(bytes: &[u8]) -> Vec<kbf_segments::IndexEntry> {
+fn entries(bytes: &[u8]) -> Vec<kbf_task_pack::one_pass::Entry> {
     let len = bytes.len() as u64;
-    let trailer = Trailer::parse(&bytes[bytes.len() - TRAILER_LEN..], len).expect("trailer");
+    let trailer = Trailer::parse(&bytes[bytes.len() - TAIL_LEN..], len).expect("trailer");
     let tail = &bytes[bytes.len() - usize::try_from(trailer.tail_len()).expect("fits")..];
     Tail::parse(&trailer, tail).expect("tail").entries
 }
@@ -93,10 +93,16 @@ async fn blobs_from_memory_and_a_teed_file_make_one_object() {
     tee.end(&to_reapi(&sha256(b"big file"))).expect("end");
     spool.finish(b"{}", b"").expect("finished");
     let bytes = file.0.lock().expect("lock").clone();
-    assert_eq!(&bytes[..13], b"smallbig file");
-    let held: Vec<_> = entries(&bytes).iter().map(|e| e.digest).collect();
-    assert_eq!(held.len(), 2);
-    assert!(held.contains(&sha256(b"small")) && held.contains(&sha256(b"big file")));
+    let found = entries(&bytes);
+    assert_eq!(found.len(), 2);
+    for (blob, first) in [(&b"small"[..], true), (&b"big file"[..], false)] {
+        let entry = found
+            .iter()
+            .find(|e| e.digest == sha256(blob))
+            .expect("an entry");
+        assert!(entry.verify(&bytes[entry.range().start as usize..entry.range().end as usize]));
+        assert_eq!(entry.offset == 68, first, "the memory blob came first");
+    }
 }
 
 #[tokio::test]
@@ -116,7 +122,18 @@ async fn a_blob_put_while_a_file_is_teed_waits_and_lands_after_it() {
     waiting.await.expect("joined").expect("put");
     spool.finish(b"{}", b"").expect("finished");
     let bytes = file.0.lock().expect("lock").clone();
-    assert_eq!(&bytes[..10], b"aaaabbbbzz");
+    // The put waited for the teed file: its bytes are whole, and `zz` is after them.
+    let found = entries(&bytes);
+    let at = |blob: &[u8]| {
+        found
+            .iter()
+            .find(|e| e.digest == sha256(blob))
+            .expect("entry")
+            .offset
+    };
+    assert_eq!(at(b"aaaabbbb"), 68);
+    assert_eq!(&bytes[68..76], b"aaaabbbb");
+    assert!(at(b"zz") > at(b"aaaabbbb") + 8);
 }
 
 #[tokio::test]
@@ -237,7 +254,7 @@ async fn the_file_index_reads_each_tree_back_and_gives_offsets_in_the_object() {
         json.contains(r#"{"path":"d/f","size":10,"exec":false"#),
         "{json}"
     );
-    assert!(json.contains(r#""offset":0}"#), "{json}");
+    assert!(json.contains(r#""offset":68}"#), "{json}");
     assert!(json.contains(r#""dirs":["d"]"#), "{json}");
 }
 

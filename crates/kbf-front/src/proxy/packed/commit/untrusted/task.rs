@@ -503,7 +503,7 @@ impl Ingest<'_> {
 
     /// The last bytes of the object, as many as a one-pass trailer (fewer for a shorter object).
     async fn end_of(&self, object: &ObjectKey, size: u64) -> Step<bytes::Bytes> {
-        let len = size.min(one_pass::TRAILER_LEN as u64);
+        let len = size.min(one_pass::TAIL_LEN as u64);
         self.read(object, size - len, len).await
     }
 

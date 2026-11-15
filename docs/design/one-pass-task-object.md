@@ -1,5 +1,8 @@
 # One output object per action, written in one pass
 
+The object is a **ZIP64 archive, uncompressed**: every entry is method 0 (stored), so each file's bytes are contiguous at its
+offset, as in tar. The writer has no compression code path and the reader refuses an entry of any other method.
+
 Status: **DESIGN, then built in the same pull request** (branch `task-output-one-pass`). Owner approval of the direction
 (2026-11-15): one object per action, outputs read once, "the single pack per action". Linux job mode with a put directory
 (`--stage-and-commit`) only; the presigned mode is untouched. Linked from [actions-as-jobs.md](actions-as-jobs.md)
@@ -24,51 +27,72 @@ object the frontend copies into the CAS, and every large file is read twice.
 - One object per action: `pack` in the put directory. No second pack, no large object, no record cap, no size cap
   (AGENTS.md B16).
 - Each output file is read once. Its bytes are written to the object while they are hashed.
-- The manifest and the index come after the last blob, at the end, found through a fixed trailer.
-- The frontend reads the trailer, then the manifest and the index in one ranged read, records every blob (large ones too) as
+- The manifest and the file index come after the last blob, as members, with the central directory and the end records, found
+  through a fixed trailer in the last 138 bytes.
+- The frontend reads the last 138 bytes, then the manifest, the file index and the central directory in one ranged read, records every blob (large ones too) as
   `digest -> (object key, offset, length)` in its pack index, and builds the ActionResult as today.
 
-## 3. The format (`KBFTASK`, version 1)
+## 3. The format: an uncompressed ZIP64 archive
 
 ```text
-blobs      each blob's bytes, back to back in the order the task produced them (see 4: gaps are possible)
-manifest   the TaskManifest JSON (the bytes `to_json_with` writes today), packs 1 and no large object
-files      the neutral file index (JSON, below; may be empty)
-index      N entries of 52 bytes, ascending by (hash, size): hash [32] | size u64 | offset u64 | crc32c u32
-trailer    64 bytes, little endian:
-             manifest_offset u64 | manifest_len u64 | index_offset u64 | entry_count u64
-             | index_crc32c u32 | manifest_crc32c u32 | digest_function u8 = 1 | reserved [3] = 0
-             | version u32 = 1 | files_crc32c u32 | trailer_crc32c u32 (of the first 52 bytes)
-             | magic [8] = "KBFTASK\n"
+entry*     local header (30 + name + 20 bytes: flag bit 3, method 0, ZIP64 extra field, sizes and CRC-32 zero)
+           the file's bytes (stored)
+           data descriptor (24 bytes: signature, CRC-32, compressed size u64, size u64)
+entry      .kbf/manifest.json      the TaskManifest JSON, packs 1 and no large object
+entry      .kbf/index.json         the neutral file index (below; may be empty)
+central directory                  one entry per distinct blob, and the two members
+ZIP64 end of central directory     44 bytes, then 40 bytes of extensible data: the trailer below
+ZIP64 end of central directory locator
+end of central directory           22 bytes, no comment, counts and offsets saturated to the ZIP64 record
 ```
 
-The entry is the entry of a `kbf-segments` footer, so the code that reads digests and offsets is shared in meaning. The
-magic differs from a segment's (`KBFSEG\r\n`), so no reader takes one format for the other: an old frontend refuses the
-object as `Malformed` and an old tool refuses it at its trailer.
+- **Stored, always.** Every local and central entry says method 0; the writer cannot write another. A reader refuses an
+  entry of method 8 (or any) as a bad object (`ObjectError::Method`, ingest `Malformed`).
+- **Names.** A blob's digest is known only after its last byte is read, and a ZIP local header comes first and names the
+  entry. So a blob is named by a counter, `b/<16 hex digits>`, in its local header and its central entry, and its SHA-256 is
+  carried in the central entry's **extra field with the private header id `0x4B42`** ("KB"; 32 bytes; not a PKWARE-registered
+  id, which every reader that does not know it skips). The manifest and the index are ordinary stored members with the fixed
+  names `.kbf/manifest.json` and `.kbf/index.json`, placed last before the central directory (a standard tool can extract
+  them; they are not carried in the directory, which keeps the directory about blobs only).
+- **Offsets.** Every local header is exactly `30 + name + 20` bytes (the 20 is the ZIP64 extra field), so a blob's bytes start at
+  its header's offset plus that: a reader computes the span from the central directory alone, without reading a local header. A
+  lie is caught as for any put-directory record: the first read hashes it.
+- **The trailer** is the extensible data of the ZIP64 end record: `magic "KBFTASK1" | manifest_offset u64 | manifest_len u64 |
+  index_offset u64 | index_len u64`, offsets of the members' *data*. The last 138 bytes of the object (end of central
+  directory 22, locator 20, ZIP64 end record 96) therefore say where the manifest is and where the central directory starts,
+  with no scan for a comment. One ranged read from `manifest_offset` to the end then holds the manifest, the index and the
+  central directory.
+- **Reader rules** (before it trusts the directory): the three end records' signatures, magic and fixed fields; the offsets add
+  up to the object's length; both members present once, at the offsets the trailer gives, their CRC-32 right; every other entry
+  stored, named `b/...`, with a SHA-256, of size at least 1, inside the records and overlapping no other; no digest twice. Gaps
+  between records are allowed (4). The order of blobs carries no meaning.
+- **ZIP64 throughout**: a 32-bit size or offset appears nowhere (the plain fields hold `0xFFFFFFFF` and the ZIP64 extra field
+  has the real ones), so nothing caps a file or the object.
+- Tools: any ZIP reader lists and extracts it (the test `a_standard_zip_reader_lists_and_reads_every_entry_stored` runs the
+  pure-Rust `zip` crate over an object, which also checks each CRC-32). The names are counters, so a listing shows `b/...`, not
+  paths; the paths are in `.kbf/index.json`. Info-ZIP's `unzip -l` and `-t` read the central directory too; tests in this
+  repository do not spawn them.
 
-Rules a reader checks before it trusts the index: `manifest_offset + manifest_len <= index_offset` (the bytes between are the file index);
-`index_offset + 52 * entry_count + 64 == object length`; the three CRCs; entries strictly ascending and of size at least 1; every
-entry inside `[0, manifest_offset)`; no two entries overlap. Gaps between entries are allowed (4). Order of the blobs and
-their contiguity carry no meaning, so the writer needs no plan.
+### Why ZIP, and not tar, EROFS or squashfs
 
-### Tar: recommended against
+- **Tar** has no end index: finding a file means walking headers (a 512-byte header and padding per entry, 2,000 small files
+  cost about 1.5 MB and as many reads), its header needs the size before the data, and its pax SHA-256 can only precede the
+  data, which one pass cannot know. ZIP's central directory is the index at the end that a one-pass writer wants, the data
+  descriptor puts size and CRC after the data, and the SHA-256 rides in the directory.
+- **EROFS and squashfs** are filesystem images: their writers lay out an inode table and directory blocks from the whole tree
+  before the data (or need a second pass to place them), they are built for mounting, which this object is not used for
+  (the input tree is composed from digests, section 3 below), and a reader needs a kernel mount or a library per format. A
+  ZIP is a flat list of spans, which is what the pack index records.
+- **Our own format** (the earlier revision of this document) did the same job with a trailer of our own. ZIP is that, with the
+  standard's names for the parts and every reader already written. The cost is a 68-byte header and 24-byte descriptor
+  per blob and a 130-byte central entry, against 52 bytes before; for 2,000 files that is about 0.4 MB on 170 MiB.
+- **Not compressed.** Build outputs are mostly already-compressed or hashed-for-reuse objects, the frontend reads a blob by
+  byte range at a known offset, and a decompressing reader would turn a ranged read into a scan.
 
-A valid uncompressed tar (pax headers, index as a final entry) would let `tar -t` list the object. Against:
+### The neutral file index (the `.kbf/index.json` member)
 
-- A tar header comes **before** its data and needs the size, and the SHA-256 in a pax header needs the whole file read
-  first. One pass puts the digest after the data, so the pax digest could only be in the index at the end, which is what
-  this format already has. A tar would carry the same index plus headers that say less.
-- 512-byte header and padding per entry: 2,000 small files cost about 1.5 MB of overhead and an equal number of header
-  reads for a reader that walks the object. This format costs 52 bytes per blob, in one place.
-- A blob is content-addressed and appears once; a tar entry is a path. Dedup (4) would leave named entries for blobs that
-  are never named.
-- Every consumer here reads by `(offset, length)` from the pack index; none lists, so nothing needs `tar`. The format is
-  small enough to read by hand with the offsets of 3 when an operator must.
-
-### The neutral file index (the `files` section)
-
-The footer carries one index in no consumer's format. The manifest already has the exit code, stdout, stderr, the timing
-and the top-level output files and symlinks; the `files` section adds, for every output file and symlink **including
+The object carries one index in no consumer's format. The manifest already has the exit code, stdout, stderr, the timing
+and the top-level output files and symlinks; the index adds, for every output file and symlink **including
 those below an output directory**, its full path, size, executable bit, SHA-256 and the offset of its bytes in this
 object, and every directory (so an empty one is not lost):
 
@@ -79,7 +103,7 @@ object, and every directory (so an empty one is not lost):
 
 Each list is sorted bytewise by path; `offset` is absent for the empty file (no record). The task builds it from the Trees
 it wrote itself (read back from its own file after a flush: they are small records of its own, not outputs) and the
-manifest. It is a footer of facts about this object, and nothing in it is tierstore's or REAPI's.
+manifest. It is a list of facts about this object, and nothing in it is tierstore's or REAPI's.
 
 **Layering.** Two systems name the same folder, and they number it differently:
 
@@ -124,12 +148,12 @@ of the crate is unchanged) a file is handled by size:
   digest was already written, the bytes just written are **dead**: the writer does not index them and does not move on from
   them. They stay in the object. This is the one tolerated waste, and it is the whole of it: a duplicate of an earlier
   file larger than 1 MiB. We tolerate it and do not truncate because the put directory is a write-once stream of the
-  node's store and a `set_len` on it is not something tierstore promises. The count of dead bytes is logged by the task; a
+  node's store and a `set_len` on it is not something tierstore promises. The writer counts them (`Written::dead_bytes`); a
   build whose outputs repeat large files pays their size once more in the object (never in the CAS: dead bytes are in no
   index entry).
 - Directory and Tree messages and stdout/stderr go through the same writer (`Store::put`), deduplicated before they are
   written.
-- After the walk: manifest, file index, index, trailer. The object's own SHA-256 is taken as the bytes go out, for the store's
+- After the walk: the manifest and index members, the central directory and the end records. The object's own SHA-256 is taken as the bytes go out, for the store's
   `<name>.sha256-<hex>.part` rename. Then the commit rename, as today.
 
 The only reads of an output are the one that hashes and writes it. A file that changes while it is read is not detected by a
@@ -139,11 +163,12 @@ already says of files changing during the walk.)
 
 ## 5. The frontend
 
-`ingest_put_dir` reads the last 64 bytes of `pack`. If they end in the new magic it follows 5.1; otherwise the old path runs
+`ingest_put_dir` reads the last 138 bytes of `pack`. If they are the end records of a one-pass object (three signatures and the magic) it follows 5.1; otherwise the old path runs
 unchanged (the same bytes are reused for its 32-byte trailer, so an old object costs no extra request).
 
-5.1 One-pass object: parse and check the trailer (entry count at most `max_object_entries`, manifest at most 4 MiB, both
-before anything is read); read `[manifest_offset, end)` once; check CRCs and the rules of 3; parse the manifest
+5.1 One-pass object: parse and check the end records (entry count at most `max_object_entries`, a config key,
+`--task-max-object-entries`, default 1,048,576; manifest at most 4 MiB; the range at most the manifest cap plus 1 KiB per
+entry; all before anything is read); read `[manifest_offset, end)` once; check the members' CRC-32s and the rules of 3 (an entry that is not method 0 is `Malformed`); parse the manifest
 (`packs` must be 1, `large` empty, for this lease and action; the declared-outputs check is unchanged); every digest the
 manifest names must be an entry (else `Incomplete`); record the object in the pack index with one row per entry, large
 ones included. Blobs over `max_blob_bytes` are then stored as today for a frontend whose reads go to storage nodes, by a
@@ -177,8 +202,8 @@ Additive: a new object kind under the same key, a new flag, no field of any ship
 | Commit rename fails | the retries of today's `commit` |
 | A task is killed mid-write | a `.part` file the store's sweep removes; no `pack`, so ingest answers `Missing` |
 | A duplicate large file | dead bytes in the object (4), not an error |
-| A lying object (index claims bytes that are not the digest, overlapping entries, entries past the manifest) | refused by the rules of 3 as `Malformed`, or served until the first read hashes the record, as for any put-directory pack |
-| An index with more than `max_object_entries` entries | `TooLarge` before the index is read |
+| A lying object (a directory that claims bytes that are not the digest, overlapping entries, entries past the manifest, an entry of method 8) | refused by the rules of 3 as `Malformed`, or served until the first read hashes the record, as for any put-directory pack |
+| A directory with more than `max_object_entries` entries | `TooLarge` before it is read |
 | The old frontend meets a one-pass object | `Malformed`; a configuration error caught by 6's order |
 
 ## 8. Measured

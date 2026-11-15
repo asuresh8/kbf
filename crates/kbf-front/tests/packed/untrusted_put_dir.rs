@@ -639,7 +639,10 @@ async fn a_one_pass_object_is_ingested_from_its_trailer_manifest_and_index() {
         .expect("asked");
     assert_eq!(info.expect("recorded").writer, format!("b/{LEASE}"));
     let p = &farm.p;
-    let records_len: u64 = farm.records().iter().map(|r| r.len() as u64).sum();
+    let end = kbf_pack::one_pass::TAIL_LEN;
+    let trailer =
+        kbf_pack::one_pass::Trailer::parse(&object[object.len() - end..], object.len() as u64)
+            .expect("an honest end");
     let tree_at = object
         .windows(p.tree.1.len())
         .position(|window| window == &p.tree.1[..])
@@ -647,14 +650,18 @@ async fn a_one_pass_object_is_ingested_from_its_trailer_manifest_and_index() {
     let ranges = farm.rig.store.ranges();
     assert_eq!(
         ranges[0],
-        (farm.key(Slot::Pack(0)), object.len() as u64 - 64, 64)
+        (
+            farm.key(Slot::Pack(0)),
+            object.len() as u64 - end as u64,
+            end as u64
+        )
     );
     assert_eq!(
         ranges[1],
         (
             farm.key(Slot::Pack(0)),
-            records_len,
-            object.len() as u64 - records_len
+            trailer.manifest_offset,
+            object.len() as u64 - trailer.manifest_offset
         )
     );
     for (key, offset, len) in &ranges[2..] {
@@ -769,11 +776,11 @@ async fn dead_bytes_between_records_are_accepted() {
     let manifest = farm.one_object_manifest();
     let mut writer = ObjectWriter::new(Vec::new());
     for record in farm.records() {
-        let mut at = writer.begin();
+        let mut at = writer.begin().expect("begun");
         writer.chunk(&mut at, record).expect("chunk");
         writer.end(at, &sha256(record)).expect("ended");
         // The same bytes again: written, not indexed.
-        let mut again = writer.begin();
+        let mut again = writer.begin().expect("begun");
         writer.chunk(&mut again, record).expect("chunk");
         writer.end(again, &sha256(record)).expect("ended");
     }
@@ -790,27 +797,34 @@ async fn dead_bytes_between_records_are_accepted() {
 }
 
 /// Asserts the refusals of a one-pass object's own rules, each before any record is read and
-/// with nothing indexed: a damaged index, a damaged trailer, an index past the entry limit, a
-/// manifest past the cap.
+/// with nothing indexed: a damaged manifest, a damaged end record, an entry of method 8 (deflate:
+/// the format has no compression), a directory past the entry limit, a manifest past the cap.
 #[tokio::test]
 async fn a_damaged_or_oversize_one_pass_object_is_refused_unread() {
     let farm = PutDir::new().await;
     let manifest = farm.one_object_manifest();
     let honest = one_pass_of(&manifest, &farm.records());
-    let records_len: usize = farm.records().iter().map(|r| r.len()).sum();
-    let json_len = manifest.to_json().expect("json").len();
+    let trailer = kbf_pack::one_pass::Trailer::parse(
+        &honest[honest.len() - kbf_pack::one_pass::TAIL_LEN..],
+        honest.len() as u64,
+    )
+    .expect("an honest end");
 
-    let mut index = honest.clone();
-    index[records_len + json_len] ^= 1;
-    let mut trailer = honest.clone();
-    let at = trailer.len() - 30;
-    trailer[at] ^= 1;
-    for (what, bytes) in [("index", index), ("trailer", trailer)] {
+    // The manifest member's bytes, a locator field, and the first central directory entry's
+    // method: 8 is deflate, which this format never has, so the object is refused whatever its
+    // bytes are.
+    let mut manifest_bytes = honest.clone();
+    manifest_bytes[trailer.manifest_offset as usize] ^= 1;
+    let mut locator = honest.clone();
+    let at = locator.len() - kbf_pack::one_pass::TAIL_LEN + 104;
+    locator[at] ^= 1;
+    let mut deflated = honest.clone();
+    deflated[trailer.cd_offset as usize + 10] = 8;
+    for bytes in [manifest_bytes, locator, deflated] {
         let farm = PutDir::new().await;
         farm.put(Slot::Pack(0), &bytes).await;
         let got = farm.run().await;
         farm.refused(got, RejectReason::Malformed);
-        let _ = what;
     }
 
     let farm = PutDir::new().await;

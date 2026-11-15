@@ -1,14 +1,17 @@
 //! Ingest of a one-pass object (`kbf_pack::one_pass`, docs/design/one-pass-task-object.md): the
 //! one object a put-directory task writes with `--object-format one-pass`, in place of packs and
-//! large objects. [`Ingest::run`] hands it here when the end of pack 0 is the format's trailer.
+//! large objects. It is an uncompressed ZIP64 archive. [`Ingest::run`] hands it here when the end
+//! of pack 0 is the format's end records.
 //!
-//! What it reads: the last 64 bytes (the trailer), then once from the manifest to the end (the
-//! manifest and the index), and no record. In order, each step refusing before the next reads:
+//! What it reads: the last 138 bytes (the end records), then once from the manifest member to
+//! the end (the manifest, the file index and the central directory), and no record. In order,
+//! each step refusing before the next reads:
 //!
-//! 1. the trailer's offsets must describe the object's length, and the manifest and the index
+//! 1. the end records' offsets must describe the object's length, and the tail one range holds
 //!    must be within [`MAX_UNTRUSTED_MANIFEST_BYTES`] and [`UntrustedLimits::max_object_entries`]
-//!    (`Malformed`, `TooLarge`), before either is read;
-//! 2. both CRCs, the order of the index and the bounds of every record (`Malformed`);
+//!    records (`Malformed`, `TooLarge`), before it is read;
+//! 2. the members' CRC-32s, that every entry is stored (an entry of any other method is
+//!    `Malformed`), has its SHA-256 and lies inside the records, and none overlaps (`Malformed`);
 //! 3. the manifest, for this lease and action, naming one pack and no large object
 //!    (`BadManifest`, `WrongKey`), and only paths the Command declares ([`Ingest::declared`]);
 //! 4. every digest the manifest names (the empty one aside) is a record (`Incomplete`);
@@ -24,20 +27,24 @@
 //! read that hashes it.
 
 use kbf_pack::TaskManifest;
-use kbf_pack::one_pass::{MAGIC, Tail, Trailer};
+use kbf_pack::one_pass::{Entry, Tail, Trailer};
 use kbf_pack_index::{BlobDigest, NewPack, PackBlob};
-use kbf_segments::IndexEntry;
 
 use super::large::Large;
 use super::task::{Ingest, Ran, RejectReason, Step, rebuilt};
 use super::{IssuedPackKey, MAX_UNTRUSTED_MANIFEST_BYTES};
 
-/// Whether `end`, the last bytes of an object, is the end of a one-pass object.
-/// The length of the trailer, which is how many bytes of the end [`Ingest::run`] reads to tell.
-pub(super) const TRAILER_LEN: usize = kbf_pack::one_pass::TRAILER_LEN;
+/// The most bytes of the tail one record may account for (its central directory entry of about
+/// 130 bytes and its line of the file index, which names a path).
+const BYTES_PER_ENTRY: u64 = 1024;
 
+/// The length of the end of a one-pass object, which is how many bytes of the end of pack 0
+/// [`Ingest::run`] reads to tell the formats apart.
+pub(super) const TAIL_LEN: usize = kbf_pack::one_pass::TAIL_LEN;
+
+/// Whether `end`, the last bytes of an object, is the end of a one-pass object.
 pub(super) fn is_one_pass(end: &[u8]) -> bool {
-    end.len() == TRAILER_LEN && end[TRAILER_LEN - MAGIC.len()..] == MAGIC
+    kbf_pack::one_pass::looks_like(end)
 }
 
 impl Ingest<'_> {
@@ -52,7 +59,14 @@ impl Ingest<'_> {
         if trailer.entry_count > max_entries {
             return Err(RejectReason::TooLarge.into());
         }
+        // What one range may hold: the manifest, and for each record at most this many bytes of
+        // its central directory entry and its line of the file index.
         let len = trailer.tail_len();
+        let most = MAX_UNTRUSTED_MANIFEST_BYTES
+            .saturating_add(max_entries.saturating_mul(BYTES_PER_ENTRY));
+        if len > most {
+            return Err(RejectReason::TooLarge.into());
+        }
         let bytes = self.read(&first.object, size - len, len).await?;
         let tail = Tail::parse(&trailer, &bytes).map_err(malformed)?;
 
@@ -98,8 +112,8 @@ impl Ingest<'_> {
 }
 
 /// The pack index's record of the object: a row for each entry of its index.
-fn new_pack(key: &IssuedPackKey, entries: &[IndexEntry], size: u64) -> NewPack {
-    let blob = |entry: &IndexEntry| PackBlob {
+fn new_pack(key: &IssuedPackKey, entries: &[Entry], size: u64) -> NewPack {
+    let blob = |entry: &Entry| PackBlob {
         digest: BlobDigest {
             hash: entry.digest.hash,
             size: entry.digest.size_bytes,

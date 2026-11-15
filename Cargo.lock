@@ -2815,6 +2815,8 @@ dependencies = [
 name = "kbf-task-pack"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "hex",
  "kbf-segments",
  "kbf-types",
@@ -2822,6 +2824,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "zip",
 ]
 
 [[package]]

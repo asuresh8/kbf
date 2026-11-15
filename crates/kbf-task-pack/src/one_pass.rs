@@ -1,53 +1,89 @@
-//! The one-pass task object: one object per action, written in one pass over the outputs, with
-//! the manifest and the index at the end (docs/design/one-pass-task-object.md).
+//! The one-pass task object: one ZIP archive per action, written in one pass over the outputs
+//! (docs/design/one-pass-task-object.md).
+//!
+//! The archive is **uncompressed**: every entry is method 0 (stored), so each file's bytes are
+//! contiguous at its offset, as in tar. There is no compression code path here, and a reader
+//! refuses an entry of any other method. ZIP64 is used throughout, so no size or offset is
+//! limited to 32 bits.
 //!
 //! ```text
-//! blobs      each blob's bytes, in the order they were written (a duplicate's bytes may sit
-//!            between two records, unindexed)
-//! manifest   the manifest JSON
-//! files      the neutral file index (JSON, may be empty): see [`Tail::files`]
-//! index      N x 52 bytes, strictly ascending by digest:
-//!              hash [32] | size u64 | offset u64 | crc32c u32
-//! trailer    64 bytes, little endian:
-//!              manifest_offset u64 | manifest_len u64 | index_offset u64 | entry_count u64
-//!              | index_crc32c u32 | manifest_crc32c u32 | digest_function u8 | reserved [3]
-//!              | version u32 | files_crc32c u32 | trailer_crc32c u32 (of the first 52 bytes)
-//!              | magic [8]
+//! entry*     local header (30 + name + 20 bytes, flag bit 3, sizes and CRC-32 zero)
+//!            data (the bytes, stored)
+//!            data descriptor (24 bytes: signature, CRC-32, compressed size u64, size u64)
+//! entry      .kbf/manifest.json   the manifest JSON
+//! entry      .kbf/index.json      the neutral file index (JSON, may be empty)
+//! central directory               one entry per distinct blob and the two members
+//! ZIP64 end of central directory  with a private extension (below)
+//! ZIP64 locator
+//! end of central directory        22 bytes, no comment
 //! ```
 //!
-//! [`ObjectWriter`] writes it through any [`Write`], blob by blob, and ends with the manifest,
-//! the index and the trailer. [`Trailer::parse`] and [`Tail::parse`] are the reader: the first
-//! from the last [`TRAILER_LEN`] bytes of the object, the second from the bytes the trailer
-//! says to fetch next (`manifest_offset` to the end), which hold the manifest and the index.
-//! Neither reads a blob. Every rule a reader needs before it trusts the index is checked there.
+//! Because a blob's digest is known only once its last byte is read, a blob is named by a
+//! counter (`b/<16 hex digits>`), not by its digest: the local header comes first. Its SHA-256
+//! is carried in the central directory, in an extra field with the private header id
+//! [`SHA256_TAG`] (0x4B42, "KB"; not a registered id, ignored by every reader that does not know
+//! it) of 32 bytes. A blob whose digest was already written is *dead*: its entry is in no
+//! central directory and its bytes stay in the object. Every local header is exactly
+//! `30 + name + 20` bytes (the 20 being the ZIP64 extra field), so a blob's bytes start at its
+//! header's offset plus that, which a reader may compute from the central directory alone.
+//!
+//! The ZIP64 end record's extensible data is this format's trailer, so a reader finds the manifest
+//! and the index from the last [`TAIL_LEN`] bytes of the object without scanning:
+//! `magic [8] | manifest_offset u64 | manifest_len u64 | index_offset u64 | index_len u64`,
+//! the offsets being those of the members' *data*. One ranged read from `manifest_offset` to the
+//! end then holds the manifest, the index and the central directory.
+//!
+//! [`ObjectWriter`] writes through any [`Write`]. [`Trailer::parse`] and [`Tail::parse`] are the
+//! reader. Neither reads a blob.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use kbf_segments::{Crc32c, IndexEntry, crc32c};
+use crc32fast::Hasher as Crc32;
 use kbf_types::{Digest, DigestFunction};
 use sha2::{Digest as _, Sha256};
 
-/// The last eight bytes of a one-pass object. Not the magic of a segment (`KBFSEG\r\n`), so
-/// neither reader takes the other's object.
-pub const MAGIC: [u8; 8] = *b"KBFTASK\n";
+/// The private extra-field header id carrying a blob's SHA-256 in its central directory entry.
+pub const SHA256_TAG: u16 = 0x4B42;
 
-/// The layout version this crate writes and reads.
-pub const VERSION: u32 = 1;
+/// The first eight bytes of the ZIP64 end record's extensible data.
+pub const MAGIC: [u8; 8] = *b"KBFTASK1";
 
-/// The length of the trailer, the last bytes of every one-pass object.
-pub const TRAILER_LEN: usize = 64;
+/// The name of the member that holds the manifest.
+pub const MANIFEST_NAME: &str = ".kbf/manifest.json";
 
-/// The length of one index entry, that of a segment's.
-pub const ENTRY_LEN: usize = 52;
+/// The name of the member that holds the neutral file index.
+pub const INDEX_NAME: &str = ".kbf/index.json";
 
-/// The trailer's code for SHA-256, that of a segment's.
-const SHA256_CODE: u8 = 1;
+/// The length of the end of every object: the end of central directory (22), the ZIP64 locator
+/// (20) and the ZIP64 end record (56 and the 40 bytes of extensible data).
+pub const TAIL_LEN: usize = 22 + 20 + 56 + 40;
+
+/// The length of a blob's name, `b/` and 16 hex digits: fixed, so that a blob's offset is
+/// computable from the central directory.
+const BLOB_NAME_LEN: usize = 18;
+const LOCAL_FIXED: u64 = 30;
+const LOCAL_EXTRA: u64 = 20;
+const DESCRIPTOR: u64 = 24;
+const SIG_LOCAL: u32 = 0x0403_4b50;
+const SIG_DESCRIPTOR: u32 = 0x0807_4b50;
+const SIG_CENTRAL: u32 = 0x0201_4b50;
+const SIG_EOCD64: u32 = 0x0606_4b50;
+const SIG_LOCATOR: u32 = 0x0706_4b50;
+const SIG_EOCD: u32 = 0x0605_4b50;
+const ZIP64_TAG: u16 = 1;
+/// General purpose flag bit 3: sizes and CRC-32 follow the data.
+const FLAG_DESCRIPTOR: u16 = 0x0008;
+/// Method 0: stored. The only method there is.
+const METHOD_STORED: u16 = 0;
+/// 1980-01-01, the earliest date a ZIP can hold: entries carry no time.
+const DOS_DATE: u16 = 0x0021;
+const VERSION: u16 = 45;
 
 /// Why an object is not a well-formed one-pass object.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ObjectError {
-    /// Fewer bytes than a trailer, or than the trailer says follow the records.
+    /// Fewer bytes than the end of the object, or than the end says follow the records.
     #[error("one-pass object truncated: needed {needed} bytes, had {available}")]
     Truncated {
         /// Bytes needed.
@@ -55,41 +91,61 @@ pub enum ObjectError {
         /// Bytes supplied.
         available: u64,
     },
-    /// The last eight bytes are not the magic.
-    #[error("not a one-pass object: wrong magic")]
+    /// The end is not the end of a one-pass object: a signature or the magic is wrong.
+    #[error("not a one-pass object: wrong signature or magic")]
     BadMagic,
-    /// A layout version this build does not read.
-    #[error("unsupported one-pass version {0}")]
-    UnsupportedVersion(u32),
-    /// A digest function code this build does not read.
-    #[error("unsupported digest function code {0}")]
-    UnsupportedDigestFunction(u8),
-    /// A reserved field is not zero.
-    #[error("one-pass trailer reserved bytes are not zero")]
-    ReservedNotZero,
-    /// The trailer's own CRC-32C does not match its bytes.
-    #[error("one-pass trailer CRC mismatch")]
-    TrailerCrc,
-    /// The files' CRC-32C does not match their bytes.
-    #[error("one-pass files CRC mismatch")]
-    FilesCrc,
-    /// The offsets of the trailer do not add up to the object's length.
+    /// A field of the end records that must be zero or a fixed value is not.
+    #[error("one-pass end records have an unexpected field")]
+    BadEnd,
+    /// The offsets of the end records do not add up to the object's length.
     #[error("one-pass offsets do not describe an object of {actual} bytes")]
     Layout {
         /// The object's length.
         actual: u64,
     },
-    /// The manifest's CRC-32C does not match its bytes.
-    #[error("one-pass manifest CRC mismatch")]
-    ManifestCrc,
-    /// The index's CRC-32C does not match its bytes.
-    #[error("one-pass index CRC mismatch")]
-    IndexCrc,
-    /// The entry at `position` does not sort strictly after the one before it.
-    #[error("one-pass index out of order at entry {position}")]
-    IndexOrder {
+    /// A central directory entry is damaged: a signature, a length or an extra field.
+    #[error("the central directory entry at position {position} is damaged")]
+    Entry {
         /// The entry's position.
         position: usize,
+    },
+    /// An entry that is not stored (method 0): this format has no compression.
+    #[error("the entry at position {position} has method {method}, not 0 (stored)")]
+    Method {
+        /// The entry's position.
+        position: usize,
+        /// The method it names.
+        method: u16,
+    },
+    /// An entry whose sizes disagree, or whose flags are not those of this format.
+    #[error("the entry at position {position} is not a stored entry with a data descriptor")]
+    Flags {
+        /// The entry's position.
+        position: usize,
+    },
+    /// An entry with a name that is neither a blob's nor a member's, or a member twice or absent.
+    #[error("the central directory names {name:?}, which this format does not")]
+    Name {
+        /// The name.
+        name: String,
+    },
+    /// A member's CRC-32 does not match its bytes.
+    #[error("the CRC-32 of {name} does not match its bytes")]
+    Crc {
+        /// The member.
+        name: &'static str,
+    },
+    /// A member is not where the end records say.
+    #[error("the member {name} is not where the end records say")]
+    Member {
+        /// The member.
+        name: &'static str,
+    },
+    /// Two entries share a digest.
+    #[error("two entries hold the blob {digest}")]
+    Duplicate {
+        /// The digest.
+        digest: Digest,
     },
     /// A record of size 0 (the empty blob is implicit in every store and is never a record).
     #[error("the record at offset {offset} has size 0")]
@@ -113,136 +169,255 @@ pub enum ObjectError {
     },
 }
 
-/// The fixed end of a one-pass object: where the manifest and the index are.
+/// A blob of the object: its digest, where its bytes start, and the CRC-32 of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// The blob's SHA-256 digest; its size is the record's length.
+    pub digest: Digest,
+    /// Where the blob's bytes start.
+    pub offset: u64,
+    /// The CRC-32 (ZIP's, IEEE) of the bytes.
+    pub crc32: u32,
+}
+
+impl Entry {
+    /// The record's byte range in the object.
+    #[must_use]
+    pub const fn range(&self) -> std::ops::Range<u64> {
+        self.offset..self.offset + self.digest.size_bytes
+    }
+
+    /// Checks that `record` is this entry's blob: its length, its CRC-32, then its digest.
+    #[must_use]
+    pub fn verify(&self, record: &[u8]) -> bool {
+        record.len() as u64 == self.digest.size_bytes
+            && crc32(record) == self.crc32
+            && Digest::new(
+                DigestFunction::Sha256,
+                Sha256::digest(record).into(),
+                record.len() as u64,
+            ) == self.digest
+    }
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut hasher = Crc32::new();
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
+/// Where the manifest and the index are, from the end of the object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Trailer {
-    /// Where the manifest starts, which is where the records end.
+    /// Where the manifest member's data starts.
     pub manifest_offset: u64,
     /// The manifest's length.
     pub manifest_len: u64,
-    /// How many bytes of files follow the manifest (0 for none).
-    pub files_len: u64,
-    /// Where the index starts.
+    /// Where the index member's data starts.
     pub index_offset: u64,
-    /// How many entries the index holds.
+    /// The index's length.
+    pub index_len: u64,
+    /// Where the central directory starts.
+    pub cd_offset: u64,
+    /// How many entries the central directory holds (the two members included).
     pub entry_count: u64,
-    index_crc32c: u32,
-    manifest_crc32c: u32,
-    files_crc32c: u32,
+    object_len: u64,
+}
+
+fn u16_at(bytes: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap_or([0; 2]))
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap_or([0; 4]))
+}
+
+fn u64_at(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap_or([0; 8]))
+}
+
+/// Whether `end`, the last bytes of an object, is the end of a one-pass object: the three end
+/// records' signatures and the magic.
+#[must_use]
+pub fn looks_like(end: &[u8]) -> bool {
+    end.len() == TAIL_LEN
+        && u32_at(end, 0) == SIG_EOCD64
+        && u32_at(end, 96) == SIG_LOCATOR
+        && u32_at(end, 116) == SIG_EOCD
+        && end[56..64] == MAGIC
 }
 
 impl Trailer {
-    fn encode(&self) -> [u8; TRAILER_LEN] {
-        let mut out = [0u8; TRAILER_LEN];
-        out[0..8].copy_from_slice(&self.manifest_offset.to_le_bytes());
-        out[8..16].copy_from_slice(&self.manifest_len.to_le_bytes());
-        out[16..24].copy_from_slice(&self.index_offset.to_le_bytes());
-        out[24..32].copy_from_slice(&self.entry_count.to_le_bytes());
-        out[32..36].copy_from_slice(&self.index_crc32c.to_le_bytes());
-        out[36..40].copy_from_slice(&self.manifest_crc32c.to_le_bytes());
-        out[40] = SHA256_CODE;
-        out[44..48].copy_from_slice(&VERSION.to_le_bytes());
-        out[48..52].copy_from_slice(&self.files_crc32c.to_le_bytes());
-        let crc = crc32c(&out[..52]);
-        out[52..56].copy_from_slice(&crc.to_le_bytes());
-        out[56..64].copy_from_slice(&MAGIC);
-        out
-    }
-
-    /// Parses `trailer`, the last [`TRAILER_LEN`] bytes of an object of `object_len` bytes, and
-    /// checks that its offsets describe that object: the manifest then the index then the
-    /// trailer, ending at `object_len`.
+    /// Parses `end`, the last [`TAIL_LEN`] bytes of an object of `object_len` bytes, and checks
+    /// that its offsets describe that object.
     ///
     /// # Errors
     /// [`ObjectError`] for the first rule that fails.
-    pub fn parse(trailer: &[u8], object_len: u64) -> Result<Self, ObjectError> {
-        if trailer.len() != TRAILER_LEN {
+    pub fn parse(end: &[u8], object_len: u64) -> Result<Self, ObjectError> {
+        if end.len() != TAIL_LEN {
             return Err(ObjectError::Truncated {
-                needed: TRAILER_LEN as u64,
-                available: trailer.len() as u64,
+                needed: TAIL_LEN as u64,
+                available: end.len() as u64,
             });
         }
-        if trailer[56..64] != MAGIC {
+        if !looks_like(end) {
             return Err(ObjectError::BadMagic);
         }
-        let u32_at =
-            |at: usize| u32::from_le_bytes(trailer[at..at + 4].try_into().unwrap_or([0; 4]));
-        let u64_at =
-            |at: usize| u64::from_le_bytes(trailer[at..at + 8].try_into().unwrap_or([0; 8]));
-        let version = u32_at(44);
-        if version != VERSION {
-            return Err(ObjectError::UnsupportedVersion(version));
-        }
-        if trailer[40] != SHA256_CODE {
-            return Err(ObjectError::UnsupportedDigestFunction(trailer[40]));
-        }
-        if trailer[41..44] != [0; 3] {
-            return Err(ObjectError::ReservedNotZero);
-        }
-        if crc32c(&trailer[..52]) != u32_at(52) {
-            return Err(ObjectError::TrailerCrc);
-        }
-        let mut parsed = Self {
-            manifest_offset: u64_at(0),
-            manifest_len: u64_at(8),
-            files_len: 0,
-            index_offset: u64_at(16),
-            entry_count: u64_at(24),
-            index_crc32c: u32_at(32),
-            manifest_crc32c: u32_at(36),
-            files_crc32c: u32_at(48),
-        };
         let layout = || ObjectError::Layout { actual: object_len };
+        // ZIP64 end record: size of the rest (44 + 40), versions, disks, counts, size, offset.
+        if u64_at(end, 4) != 44 + 40
+            || u32_at(end, 16) != 0
+            || u32_at(end, 20) != 0
+            || u64_at(end, 24) != u64_at(end, 32)
+        {
+            return Err(ObjectError::BadEnd);
+        }
+        let entry_count = u64_at(end, 32);
+        let cd_size = u64_at(end, 40);
+        let cd_offset = u64_at(end, 48);
+        let eocd64_at = object_len.checked_sub(TAIL_LEN as u64).ok_or_else(layout)?;
+        // The locator: disk 0, the end record's offset, one disk.
+        if u32_at(end, 100) != 0 || u64_at(end, 104) != eocd64_at || u32_at(end, 112) != 1 {
+            return Err(ObjectError::BadEnd);
+        }
+        // The plain end record: no disks, saturated counts and offsets, no comment.
+        let e = 116;
+        if u16_at(end, e + 4) != 0
+            || u16_at(end, e + 6) != 0
+            || u16_at(end, e + 8) != 0xFFFF
+            || u16_at(end, e + 10) != 0xFFFF
+            || u32_at(end, e + 12) != u32::MAX
+            || u32_at(end, e + 16) != u32::MAX
+            || u16_at(end, e + 20) != 0
+        {
+            return Err(ObjectError::BadEnd);
+        }
+        let parsed = Self {
+            manifest_offset: u64_at(end, 64),
+            manifest_len: u64_at(end, 72),
+            index_offset: u64_at(end, 80),
+            index_len: u64_at(end, 88),
+            cd_offset,
+            entry_count,
+            object_len,
+        };
         let manifest_end = parsed
             .manifest_offset
             .checked_add(parsed.manifest_len)
             .ok_or_else(layout)?;
-        let index_len = parsed
-            .entry_count
-            .checked_mul(ENTRY_LEN as u64)
-            .ok_or_else(layout)?;
-        let end = parsed
+        let index_end = parsed
             .index_offset
-            .checked_add(index_len)
-            .and_then(|end| end.checked_add(TRAILER_LEN as u64))
+            .checked_add(parsed.index_len)
             .ok_or_else(layout)?;
-        if manifest_end > parsed.index_offset || end != object_len {
+        // The central directory follows the last record and ends where the end records start;
+        // the index member follows the manifest member.
+        let members = manifest_end <= parsed.index_offset && index_end <= cd_offset;
+        let ends = cd_offset.checked_add(cd_size) == Some(eocd64_at);
+        // Each entry takes 46 bytes at least, which bounds the count by the directory.
+        let counted = entry_count
+            .checked_mul(46)
+            .is_some_and(|least| least <= cd_size);
+        if !(members && ends && counted) {
             return Err(layout());
         }
-        parsed.files_len = parsed.index_offset - manifest_end;
         Ok(parsed)
     }
 
-    /// How many bytes from the end of the object hold the manifest, the files, the index and
-    /// the trailer: what a reader fetches next.
+    /// How many bytes from the end of the object a reader fetches next: the manifest, the index
+    /// and the central directory with the end records.
     #[must_use]
     pub const fn tail_len(&self) -> u64 {
-        self.manifest_len
-            + self.files_len
-            + self.entry_count * ENTRY_LEN as u64
-            + TRAILER_LEN as u64
+        self.object_len - self.manifest_offset
     }
 }
 
-/// The manifest and the index of a one-pass object, checked.
+/// The manifest, the index and the blobs of a one-pass object, checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tail {
-    /// The manifest record's bytes.
+    /// The manifest member's bytes.
     pub manifest: Vec<u8>,
-    /// The neutral file index: every output file and symlink with its size, mode, SHA-256 and
-    /// offset in this object (docs/design/one-pass-task-object.md the end of section 3). Opaque here;
+    /// The neutral file index (docs/design/one-pass-task-object.md section 3). Opaque here;
     /// empty for none.
     pub files: Vec<u8>,
-    /// Every record, in digest order.
-    pub entries: Vec<IndexEntry>,
+    /// Every blob, in digest order.
+    pub entries: Vec<Entry>,
+}
+
+/// One central directory entry, as far as this format reads it.
+struct Central<'a> {
+    name: &'a [u8],
+    crc32: u32,
+    size: u64,
+    header_offset: u64,
+    sha256: Option<[u8; 32]>,
+}
+
+/// Reads the central directory entry at the start of `bytes`; its length too.
+fn central(bytes: &[u8], position: usize) -> Result<(Central<'_>, usize), ObjectError> {
+    let bad = || ObjectError::Entry { position };
+    if bytes.len() < 46 || u32_at(bytes, 0) != SIG_CENTRAL {
+        return Err(bad());
+    }
+    let method = u16_at(bytes, 10);
+    if method != METHOD_STORED {
+        return Err(ObjectError::Method { position, method });
+    }
+    let (name_len, extra_len, comment_len) = (
+        usize::from(u16_at(bytes, 28)),
+        usize::from(u16_at(bytes, 30)),
+        usize::from(u16_at(bytes, 32)),
+    );
+    let len = 46 + name_len + extra_len + comment_len;
+    if bytes.len() < len || comment_len != 0 {
+        return Err(bad());
+    }
+    let saturated = u32_at(bytes, 20) == u32::MAX
+        && u32_at(bytes, 24) == u32::MAX
+        && u32_at(bytes, 42) == u32::MAX;
+    if u16_at(bytes, 8) != FLAG_DESCRIPTOR || !saturated {
+        return Err(ObjectError::Flags { position });
+    }
+    let name = &bytes[46..46 + name_len];
+    let mut extra = &bytes[46 + name_len..46 + name_len + extra_len];
+    let (mut zip64, mut sha256) = (None, None);
+    while !extra.is_empty() {
+        if extra.len() < 4 {
+            return Err(bad());
+        }
+        let (tag, size) = (u16_at(extra, 0), usize::from(u16_at(extra, 2)));
+        let Some(data) = extra.get(4..4 + size) else {
+            return Err(bad());
+        };
+        match tag {
+            ZIP64_TAG if size == 24 => {
+                zip64 = Some((u64_at(data, 0), u64_at(data, 8), u64_at(data, 16)));
+            }
+            SHA256_TAG if size == 32 => sha256 = data.try_into().ok(),
+            _ => return Err(bad()),
+        }
+        extra = &extra[4 + size..];
+    }
+    let (size, compressed, header_offset) = zip64.ok_or_else(bad)?;
+    if size != compressed {
+        return Err(ObjectError::Flags { position });
+    }
+    let entry = Central {
+        name,
+        crc32: u32_at(bytes, 16),
+        size,
+        header_offset,
+        sha256,
+    };
+    Ok((entry, len))
 }
 
 impl Tail {
     /// Parses `tail`, the last [`Trailer::tail_len`] bytes of the object `trailer` is the end of.
     ///
-    /// Checks both CRCs; that entries ascend strictly by digest, none is of size 0, each lies
-    /// inside the records (before the manifest) and no two overlap. Gaps between records are
-    /// allowed. Reads no blob.
+    /// Checks: both members, by name, CRC-32 and place; that every other entry is a stored
+    /// blob (method 0, never any other) with a SHA-256, none twice and none of size 0; that each
+    /// lies inside the records (before the manifest) and no two overlap. Gaps between records
+    /// are allowed. Reads no blob.
     ///
     /// # Errors
     /// [`ObjectError`] for the first rule that fails.
@@ -253,45 +428,92 @@ impl Tail {
                 available: tail.len() as u64,
             });
         }
-        // The lengths were checked against the object by `Trailer::parse` and against `tail`
-        // just now, so both fit `usize` on any target that could hold the bytes.
-        let manifest_len = usize::try_from(trailer.manifest_len).unwrap_or(usize::MAX);
-        let manifest = &tail[..manifest_len];
-        let files_len = usize::try_from(trailer.files_len).unwrap_or(usize::MAX);
-        let files = &tail[manifest_len..manifest_len + files_len];
-        let index = &tail[manifest_len + files_len..tail.len() - TRAILER_LEN];
-        if crc32c(manifest) != trailer.manifest_crc32c {
-            return Err(ObjectError::ManifestCrc);
-        }
-        if crc32c(files) != trailer.files_crc32c {
-            return Err(ObjectError::FilesCrc);
-        }
-        if crc32c(index) != trailer.index_crc32c {
-            return Err(ObjectError::IndexCrc);
-        }
-        let mut entries: Vec<IndexEntry> = Vec::with_capacity(index.len() / ENTRY_LEN);
-        for (position, raw) in index.chunks_exact(ENTRY_LEN).enumerate() {
-            let entry = decode_entry(raw);
-            if entries
-                .last()
-                .is_some_and(|prev| prev.digest >= entry.digest)
-            {
-                return Err(ObjectError::IndexOrder { position });
+        let layout = || ObjectError::Layout {
+            actual: trailer.object_len,
+        };
+        // `tail` is as long as the end of an object a reader holds, so these fit `usize`.
+        let at =
+            |offset: u64| usize::try_from(offset - trailer.manifest_offset).unwrap_or(usize::MAX);
+        let slice = |offset: u64, len: u64, name: &'static str| {
+            let start = at(offset);
+            start
+                .checked_add(usize::try_from(len).unwrap_or(usize::MAX))
+                .and_then(|end| tail.get(start..end))
+                .ok_or(ObjectError::Member { name })
+        };
+        let manifest = slice(trailer.manifest_offset, trailer.manifest_len, MANIFEST_NAME)?;
+        let files = slice(trailer.index_offset, trailer.index_len, INDEX_NAME)?;
+        let mut rest = tail
+            .get(at(trailer.cd_offset)..tail.len() - TAIL_LEN)
+            .ok_or_else(layout)?;
+        let (mut have_manifest, mut have_index) = (false, false);
+        let mut entries: Vec<Entry> = Vec::new();
+        for position in 0..usize::try_from(trailer.entry_count).unwrap_or(usize::MAX) {
+            let (entry, len) = central(rest, position)?;
+            rest = &rest[len..];
+            let data = entry.header_offset + LOCAL_FIXED + entry.name.len() as u64 + LOCAL_EXTRA;
+            let name = String::from_utf8_lossy(entry.name).into_owned();
+            let member = if entry.name == MANIFEST_NAME.as_bytes() {
+                Some((
+                    MANIFEST_NAME,
+                    manifest,
+                    trailer.manifest_offset,
+                    &mut have_manifest,
+                ))
+            } else if entry.name == INDEX_NAME.as_bytes() {
+                Some((INDEX_NAME, files, trailer.index_offset, &mut have_index))
+            } else {
+                None
+            };
+            if let Some((member, bytes, offset, seen)) = member {
+                if std::mem::replace(seen, true) {
+                    return Err(ObjectError::Name { name });
+                }
+                if data != offset || entry.size != bytes.len() as u64 {
+                    return Err(ObjectError::Member { name: member });
+                }
+                if crc32(bytes) != entry.crc32 {
+                    return Err(ObjectError::Crc { name: member });
+                }
+                continue;
             }
-            if entry.digest.size_bytes == 0 {
-                return Err(ObjectError::ZeroSize {
-                    offset: entry.offset,
-                });
+            if entry.name.len() != BLOB_NAME_LEN || !entry.name.starts_with(b"b/") {
+                return Err(ObjectError::Name { name });
             }
-            let end = entry.offset.checked_add(entry.digest.size_bytes);
+            let Some(sha256) = entry.sha256 else {
+                return Err(ObjectError::Entry { position });
+            };
+            if entry.size == 0 {
+                return Err(ObjectError::ZeroSize { offset: data });
+            }
+            let digest = Digest::new(DigestFunction::Sha256, sha256, entry.size);
+            let end = data.checked_add(entry.size);
             if end.is_none_or(|end| end > trailer.manifest_offset) {
-                return Err(ObjectError::OutOfBounds {
-                    digest: entry.digest,
+                return Err(ObjectError::OutOfBounds { digest });
+            }
+            entries.push(Entry {
+                digest,
+                offset: data,
+                crc32: entry.crc32,
+            });
+        }
+        if !rest.is_empty() {
+            return Err(layout());
+        }
+        for (seen, name) in [(have_manifest, MANIFEST_NAME), (have_index, INDEX_NAME)] {
+            if !seen {
+                return Err(ObjectError::Name {
+                    name: name.to_owned(),
                 });
             }
-            entries.push(entry);
         }
-        let mut by_offset: Vec<&IndexEntry> = entries.iter().collect();
+        entries.sort_by_key(|e| e.digest);
+        if let Some(pair) = entries.windows(2).find(|p| p[0].digest == p[1].digest) {
+            return Err(ObjectError::Duplicate {
+                digest: pair[0].digest,
+            });
+        }
+        let mut by_offset: Vec<&Entry> = entries.iter().collect();
         by_offset.sort_by_key(|e| e.offset);
         for pair in by_offset.windows(2) {
             if pair[1].offset < pair[0].range().end {
@@ -309,31 +531,17 @@ impl Tail {
     }
 }
 
-fn encode_entry(out: &mut Vec<u8>, entry: &IndexEntry) {
-    out.extend_from_slice(&entry.digest.hash);
-    out.extend_from_slice(&entry.digest.size_bytes.to_le_bytes());
-    out.extend_from_slice(&entry.offset.to_le_bytes());
-    out.extend_from_slice(&entry.crc32c.to_le_bytes());
-}
-
-fn decode_entry(raw: &[u8]) -> IndexEntry {
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&raw[..32]);
-    let u64_at = |at: usize| u64::from_le_bytes(raw[at..at + 8].try_into().unwrap_or([0; 8]));
-    IndexEntry {
-        digest: Digest::new(DigestFunction::Sha256, hash, u64_at(32)),
-        offset: u64_at(40),
-        crc32c: u32::from_le_bytes(raw[48..52].try_into().unwrap_or([0; 4])),
-    }
-}
-
-/// A blob being streamed into the object: its bytes are written as they come, and it is
-/// indexed only by [`ObjectWriter::end`], once its digest is known.
+/// A blob being streamed into the object: its bytes are written as they come, and it is listed
+/// only by [`ObjectWriter::end`], once its digest is known.
 #[derive(Debug)]
 pub struct Streaming {
-    offset: u64,
-    crc: Crc32c,
+    /// Where its local header starts.
+    header: u64,
+    crc: Crc32,
     len: u64,
+    /// The bytes of the whole entry so far: header and data.
+    written: u64,
+    name: String,
 }
 
 /// What a finished object is.
@@ -341,23 +549,42 @@ pub struct Streaming {
 pub struct Written {
     /// The SHA-256 digest of the whole object, hashed as it was written.
     pub object: Digest,
-    /// How many distinct blobs the index holds.
+    /// How many distinct blobs the central directory holds, the two members not counted.
     pub blobs: u64,
-    /// The bytes written for a streamed blob that turned out to be a duplicate of an earlier
-    /// one: in the object, in no entry.
+    /// The bytes of entries (header, data, descriptor) of a streamed blob that turned out to be a
+    /// duplicate of an earlier one: in the object, in no central directory entry.
     pub dead_bytes: u64,
+}
+
+/// One entry of the central directory to come.
+struct Listed {
+    name: String,
+    header: u64,
+    size: u64,
+    crc32: u32,
+    sha256: Option<[u8; 32]>,
+}
+
+impl Listed {
+    /// Where the entry's data starts.
+    fn data(&self) -> u64 {
+        self.header + LOCAL_FIXED + self.name.len() as u64 + LOCAL_EXTRA
+    }
 }
 
 /// Writes a one-pass object through `W`, one blob at a time; see the module documentation.
 ///
-/// The writer holds the index (one entry per distinct blob) and nothing of a blob. It is
-/// single-writer: a streamed blob ([`ObjectWriter::begin`]) is ended before the next blob
-/// starts.
+/// The writer holds the central directory's entries (one per distinct blob) and nothing of a
+/// blob. It is single-writer: a streamed blob ([`ObjectWriter::begin`]) is ended before the next
+/// blob starts.
 pub struct ObjectWriter<W: Write> {
     out: W,
     len: u64,
     object: Sha256,
-    entries: BTreeMap<Digest, (u64, u32)>,
+    listed: Vec<Listed>,
+    /// A digest's place in `listed`.
+    held: BTreeMap<Digest, usize>,
+    next: u64,
     dead: u64,
 }
 
@@ -368,21 +595,23 @@ impl<W: Write> ObjectWriter<W> {
             out,
             len: 0,
             object: Sha256::new(),
-            entries: BTreeMap::new(),
+            listed: Vec::new(),
+            held: BTreeMap::new(),
+            next: 0,
             dead: 0,
         }
     }
 
-    /// Whether a blob of this digest is in the index.
+    /// Whether a blob of this digest is in the central directory to come.
     #[must_use]
     pub fn holds(&self, digest: &Digest) -> bool {
-        self.entries.contains_key(digest)
+        self.held.contains_key(digest)
     }
 
-    /// Where the blob `digest` starts in the object, if it is held.
+    /// Where the bytes of the blob `digest` start in the object, if it is held.
     #[must_use]
     pub fn offset_of(&self, digest: &Digest) -> Option<u64> {
-        self.entries.get(digest).map(|(offset, _)| *offset)
+        self.held.get(digest).map(|at| self.listed[*at].data())
     }
 
     /// The sink, for a caller that must flush it before it reads what was written.
@@ -409,6 +638,58 @@ impl<W: Write> ObjectWriter<W> {
         Ok(())
     }
 
+    /// Writes the local header of an entry named `name`; returns its offset.
+    fn header(&mut self, name: &str) -> io::Result<u64> {
+        let at = self.len;
+        let mut head = Vec::with_capacity(50 + name.len());
+        head.extend_from_slice(&SIG_LOCAL.to_le_bytes());
+        head.extend_from_slice(&VERSION.to_le_bytes());
+        head.extend_from_slice(&FLAG_DESCRIPTOR.to_le_bytes());
+        head.extend_from_slice(&METHOD_STORED.to_le_bytes());
+        head.extend_from_slice(&0u16.to_le_bytes()); // time
+        head.extend_from_slice(&DOS_DATE.to_le_bytes());
+        head.extend_from_slice(&[0; 12]); // CRC-32 and sizes: they follow the data
+        head.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        head.extend_from_slice(&(LOCAL_EXTRA as u16).to_le_bytes());
+        head.extend_from_slice(name.as_bytes());
+        head.extend_from_slice(&ZIP64_TAG.to_le_bytes());
+        head.extend_from_slice(&16u16.to_le_bytes());
+        head.extend_from_slice(&[0; 16]);
+        self.put(&head)?;
+        Ok(at)
+    }
+
+    /// Writes the data descriptor of an entry whose data is `size` bytes and CRC-32 `crc32`.
+    fn descriptor(&mut self, crc32: u32, size: u64) -> io::Result<()> {
+        let mut tail = Vec::with_capacity(DESCRIPTOR as usize);
+        tail.extend_from_slice(&SIG_DESCRIPTOR.to_le_bytes());
+        tail.extend_from_slice(&crc32.to_le_bytes());
+        tail.extend_from_slice(&size.to_le_bytes());
+        tail.extend_from_slice(&size.to_le_bytes());
+        self.put(&tail)
+    }
+
+    fn blob_name(&mut self) -> String {
+        self.next += 1;
+        format!("b/{:016x}", self.next)
+    }
+
+    /// Writes a whole entry named `name` of `bytes`; returns the index of its listing.
+    fn entry(&mut self, name: String, bytes: &[u8], sha256: Option<[u8; 32]>) -> io::Result<usize> {
+        let header = self.header(&name)?;
+        self.put(bytes)?;
+        let crc32 = crc32(bytes);
+        self.descriptor(crc32, bytes.len() as u64)?;
+        self.listed.push(Listed {
+            name,
+            header,
+            size: bytes.len() as u64,
+            crc32,
+            sha256,
+        });
+        Ok(self.listed.len() - 1)
+    }
+
     /// Writes `bytes`, the blob `digest` names, unless the empty blob or one already written.
     /// Returns whether it was written. Nothing is written for a blob that is not new, so a blob
     /// held in memory never costs a dead byte.
@@ -419,20 +700,28 @@ impl<W: Write> ObjectWriter<W> {
         if digest.size_bytes == 0 || self.holds(digest) {
             return Ok(false);
         }
-        let offset = self.len;
-        self.put(bytes)?;
-        self.entries.insert(*digest, (offset, crc32c(bytes)));
+        let name = self.blob_name();
+        let at = self.entry(name, bytes, Some(digest.hash))?;
+        self.held.insert(*digest, at);
         Ok(true)
     }
 
-    /// Starts a blob whose digest is not yet known: its bytes follow in [`ObjectWriter::chunk`]
-    /// calls and [`ObjectWriter::end`] names it.
-    pub fn begin(&self) -> Streaming {
-        Streaming {
-            offset: self.len,
-            crc: Crc32c::new(),
+    /// Starts a blob whose digest is not yet known: its local header is written now, its bytes
+    /// follow in [`ObjectWriter::chunk`] calls and [`ObjectWriter::end`] names it.
+    ///
+    /// # Errors
+    /// The sink's error.
+    pub fn begin(&mut self) -> io::Result<Streaming> {
+        let name = self.blob_name();
+        let before = self.len;
+        let header = self.header(&name)?;
+        Ok(Streaming {
+            header,
+            crc: Crc32::new(),
             len: 0,
-        }
+            written: self.len - before,
+            name,
+        })
     }
 
     /// Writes the next bytes of the streamed blob `at`.
@@ -443,15 +732,16 @@ impl<W: Write> ObjectWriter<W> {
         self.put(bytes)?;
         at.crc.update(bytes);
         at.len += bytes.len() as u64;
+        at.written += bytes.len() as u64;
         Ok(())
     }
 
-    /// Ends the streamed blob `at`, whose bytes hash to `digest`. A new blob is indexed where it
-    /// began. One already held (or empty) is not indexed and its bytes are dead: they stay in
-    /// the object. Returns whether it was indexed.
+    /// Ends the streamed blob `at`, whose bytes hash to `digest`: writes its data descriptor. A
+    /// new blob is listed where it began. One already held (or empty) is not listed and its
+    /// bytes are dead: they stay in the object. Returns whether it was listed.
     ///
     /// # Errors
-    /// `InvalidData` when the bytes written are not `digest.size_bytes` long.
+    /// `InvalidData` when the bytes written are not `digest.size_bytes` long; the sink's error.
     pub fn end(&mut self, at: Streaming, digest: &Digest) -> io::Result<bool> {
         if at.len != digest.size_bytes {
             return Err(io::Error::new(
@@ -459,55 +749,114 @@ impl<W: Write> ObjectWriter<W> {
                 "a streamed blob is not as long as its digest says",
             ));
         }
+        let crc32 = at.crc.finalize();
+        self.descriptor(crc32, at.len)?;
         if digest.size_bytes == 0 || self.holds(digest) {
-            self.dead += at.len;
+            self.dead += at.written + DESCRIPTOR;
             return Ok(false);
         }
-        self.entries.insert(*digest, (at.offset, at.crc.finish()));
+        self.listed.push(Listed {
+            name: at.name,
+            header: at.header,
+            size: at.len,
+            crc32,
+            sha256: Some(digest.hash),
+        });
+        self.held.insert(*digest, self.listed.len() - 1);
         Ok(true)
     }
 
-    /// Ends the object: writes `manifest`, `files` (may be empty), the index and the trailer,
-    /// and returns the sink with what was written. The sink is not flushed.
+    /// Ends the object: writes the manifest and the index as members, the central directory and
+    /// the end records, and returns the sink with what was written. The sink is not flushed.
     ///
     /// # Errors
     /// The sink's error.
     pub fn finish(mut self, manifest: &[u8], files: &[u8]) -> io::Result<(W, Written)> {
-        let manifest_offset = self.len;
-        self.put(manifest)?;
-        self.put(files)?;
-        let mut index = Vec::with_capacity(self.entries.len() * ENTRY_LEN);
-        for (digest, (offset, crc32c)) in &self.entries {
-            let entry = IndexEntry {
-                digest: *digest,
-                offset: *offset,
-                crc32c: *crc32c,
-            };
-            encode_entry(&mut index, &entry);
+        let blobs = self.held.len() as u64;
+        let manifest_at = self.entry(MANIFEST_NAME.to_owned(), manifest, None)?;
+        let index_at = self.entry(INDEX_NAME.to_owned(), files, None)?;
+        let manifest_offset = self.listed[manifest_at].data();
+        let index_offset = self.listed[index_at].data();
+        let cd_offset = self.len;
+        let mut directory = Vec::new();
+        for entry in &self.listed {
+            central_entry(&mut directory, entry);
         }
-        let index_offset = self.len;
-        self.put(&index)?;
-        let trailer = Trailer {
+        let cd_size = directory.len() as u64;
+        self.put(&directory)?;
+        let count = self.listed.len() as u64;
+        let mut end = Vec::with_capacity(TAIL_LEN);
+        // ZIP64 end of central directory record, then its private extensible data.
+        end.extend_from_slice(&SIG_EOCD64.to_le_bytes());
+        end.extend_from_slice(&(44u64 + 40).to_le_bytes());
+        end.extend_from_slice(&VERSION.to_le_bytes());
+        end.extend_from_slice(&VERSION.to_le_bytes());
+        end.extend_from_slice(&[0; 8]); // this disk, the disk of the directory
+        end.extend_from_slice(&count.to_le_bytes());
+        end.extend_from_slice(&count.to_le_bytes());
+        end.extend_from_slice(&cd_size.to_le_bytes());
+        end.extend_from_slice(&cd_offset.to_le_bytes());
+        end.extend_from_slice(&MAGIC);
+        let members = [
             manifest_offset,
-            manifest_len: manifest.len() as u64,
-            files_len: files.len() as u64,
+            manifest.len() as u64,
             index_offset,
-            entry_count: self.entries.len() as u64,
-            index_crc32c: crc32c(&index),
-            manifest_crc32c: crc32c(manifest),
-            files_crc32c: crc32c(files),
-        };
-        self.put(&trailer.encode())?;
-        let object = Digest::new(
-            DigestFunction::Sha256,
-            self.object.finalize().into(),
-            self.len,
-        );
+            files.len() as u64,
+        ];
+        for n in members {
+            end.extend_from_slice(&n.to_le_bytes());
+        }
+        end.extend_from_slice(&SIG_LOCATOR.to_le_bytes());
+        end.extend_from_slice(&0u32.to_le_bytes());
+        end.extend_from_slice(&(cd_offset + cd_size).to_le_bytes());
+        end.extend_from_slice(&1u32.to_le_bytes());
+        end.extend_from_slice(&SIG_EOCD.to_le_bytes());
+        end.extend_from_slice(&[0; 4]); // disks
+        end.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        end.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        end.extend_from_slice(&u32::MAX.to_le_bytes());
+        end.extend_from_slice(&u32::MAX.to_le_bytes());
+        end.extend_from_slice(&0u16.to_le_bytes()); // no comment
+        self.put(&end)?;
+        let hash = self.object.finalize().into();
         let written = Written {
-            object,
-            blobs: self.entries.len() as u64,
+            object: Digest::new(DigestFunction::Sha256, hash, self.len),
+            blobs,
             dead_bytes: self.dead,
         };
         Ok((self.out, written))
+    }
+}
+
+/// Appends the central directory entry of `entry` to `out`.
+fn central_entry(out: &mut Vec<u8>, entry: &Listed) {
+    let extra_len = 4 + 24 + if entry.sha256.is_some() { 4 + 32 } else { 0 };
+    out.extend_from_slice(&SIG_CENTRAL.to_le_bytes());
+    out.extend_from_slice(&((3u16 << 8) | VERSION).to_le_bytes()); // made by: Unix
+    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&FLAG_DESCRIPTOR.to_le_bytes());
+    out.extend_from_slice(&METHOD_STORED.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // time
+    out.extend_from_slice(&DOS_DATE.to_le_bytes());
+    out.extend_from_slice(&entry.crc32.to_le_bytes());
+    out.extend_from_slice(&u32::MAX.to_le_bytes()); // sizes are in the ZIP64 field
+    out.extend_from_slice(&u32::MAX.to_le_bytes());
+    out.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(extra_len as u16).to_le_bytes());
+    out.extend_from_slice(&[0; 2]); // comment length
+    out.extend_from_slice(&[0; 2]); // disk
+    out.extend_from_slice(&[0; 2]); // internal attributes
+    out.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes());
+    out.extend_from_slice(&u32::MAX.to_le_bytes()); // the offset is in the ZIP64 field
+    out.extend_from_slice(entry.name.as_bytes());
+    out.extend_from_slice(&ZIP64_TAG.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&entry.size.to_le_bytes());
+    out.extend_from_slice(&entry.size.to_le_bytes());
+    out.extend_from_slice(&entry.header.to_le_bytes());
+    if let Some(sha256) = entry.sha256 {
+        out.extend_from_slice(&SHA256_TAG.to_le_bytes());
+        out.extend_from_slice(&32u16.to_le_bytes());
+        out.extend_from_slice(&sha256);
     }
 }

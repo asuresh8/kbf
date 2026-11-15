@@ -591,7 +591,7 @@ mod tests {
     /// once; the recorder keeps nothing and refuses a file handed to it whole.
     #[tokio::test]
     async fn a_spooled_collection_writes_every_blob_to_the_object() {
-        use kbf_task_pack::one_pass::{TRAILER_LEN, Tail, Trailer};
+        use kbf_task_pack::one_pass::{TAIL_LEN, Tail, Trailer};
 
         #[derive(Clone, Default)]
         struct Shared(Arc<Mutex<Vec<u8>>>);
@@ -626,8 +626,8 @@ mod tests {
         assert!(outputs.blobs.is_empty());
         spool.finish(b"{}", b"").expect("finished");
         let bytes = file.0.lock().expect("lock").clone();
-        let trailer = Trailer::parse(&bytes[bytes.len() - TRAILER_LEN..], bytes.len() as u64)
-            .expect("trailer");
+        let trailer =
+            Trailer::parse(&bytes[bytes.len() - TAIL_LEN..], bytes.len() as u64).expect("trailer");
         let tail = &bytes[bytes.len() - usize::try_from(trailer.tail_len()).expect("fits")..];
         let held: Vec<_> = Tail::parse(&trailer, tail)
             .expect("tail")

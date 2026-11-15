@@ -230,7 +230,7 @@ fn one_pass_cli(root: &Path, action: &Digest, out: &Path) -> Cli {
 
 /// The manifest and the entries of the one-pass object `object`, each record checked against
 /// its entry's CRC and digest.
-fn read_one_pass(object: &[u8]) -> (TaskManifest, Vec<kbf_segments::IndexEntry>) {
+fn read_one_pass(object: &[u8]) -> (TaskManifest, Vec<kbf_task_pack::one_pass::Entry>) {
     let (manifest, entries, _) = read_one_pass_files(object);
     (manifest, entries)
 }
@@ -240,19 +240,17 @@ fn read_one_pass_files(
     object: &[u8],
 ) -> (
     TaskManifest,
-    Vec<kbf_segments::IndexEntry>,
+    Vec<kbf_task_pack::one_pass::Entry>,
     serde_json::Value,
 ) {
-    use kbf_task_pack::one_pass::{TRAILER_LEN, Tail, Trailer};
+    use kbf_task_pack::one_pass::{TAIL_LEN, Tail, Trailer};
     let len = object.len() as u64;
-    let trailer = Trailer::parse(&object[object.len() - TRAILER_LEN..], len).expect("trailer");
+    let trailer = Trailer::parse(&object[object.len() - TAIL_LEN..], len).expect("trailer");
     let tail = &object[object.len() - usize::try_from(trailer.tail_len()).expect("fits")..];
     let tail = Tail::parse(&trailer, tail).expect("tail");
     for entry in &tail.entries {
         let range = entry.range();
-        entry
-            .verify(&object[range.start as usize..range.end as usize])
-            .expect("a record");
+        assert!(entry.verify(&object[range.start as usize..range.end as usize]));
     }
     let manifest = TaskManifest::parse_with(&tail.manifest, MAX_LARGE_BYTES).expect("manifest");
     let files = serde_json::from_slice(&tail.files).expect("the file index is JSON");

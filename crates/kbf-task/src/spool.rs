@@ -214,8 +214,10 @@ impl Spool {
 impl Tee for Spool {
     fn open(&self) -> io::Result<Box<dyn TeeFile>> {
         // Called on the blocking pool; waits for a blob being written by `put`.
-        let guard = Arc::clone(&self.writer).blocking_lock_owned();
-        let at = guard.begin();
+        let mut guard = Arc::clone(&self.writer).blocking_lock_owned();
+        let at = guard
+            .begin()
+            .map_err(|error| record(&self.failure, error))?;
         Ok(Box::new(Streamed {
             guard,
             at,

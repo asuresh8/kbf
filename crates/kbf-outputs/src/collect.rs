@@ -863,6 +863,52 @@ mod tests {
         }
     }
 
+    /// A tee that keeps the bytes it is given, for a unit test of the one-pass read.
+    struct Keep(std::sync::Arc<std::sync::Mutex<(Vec<u8>, Option<Digest>)>>);
+
+    impl Tee for Keep {
+        fn open(&self) -> std::io::Result<Box<dyn crate::TeeFile>> {
+            Ok(Box::new(Keep(std::sync::Arc::clone(&self.0))))
+        }
+    }
+
+    impl crate::TeeFile for Keep {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.0.lock().expect("lock").0.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn end(self: Box<Self>, digest: &Digest) -> std::io::Result<()> {
+            self.0.lock().expect("lock").1 = Some(digest.clone());
+            Ok(())
+        }
+    }
+
+    /// A file read with a tee is read once: its bytes go to the tee as they are hashed, a file
+    /// handed over is not made, and one past the bound still stops the read.
+    #[test]
+    fn a_large_file_read_with_a_tee_goes_to_it_whole() {
+        let dir = scratch("tee-read");
+        let fd = open(&dir);
+        let large: Vec<u8> = (0..(2 * CHUNK_BYTES + 7))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        std::fs::write(dir.join("large"), &large).expect("write");
+        let kept = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), None)));
+        let keep = Keep(std::sync::Arc::clone(&kept));
+        let read = |max| read_file(&fd, OsStr::new("large"), max, Some(&keep)).expect("read");
+        let (blob, _) = read(u64::MAX).expect("within the bound");
+        assert_eq!(
+            format!("{blob:?}"),
+            format!("{:?}", Blob::Spooled(digest_of(&large)))
+        );
+        let kept = kept.lock().expect("lock");
+        assert_eq!(kept.0, large);
+        assert_eq!(kept.1, Some(digest_of(&large)));
+        drop(kept);
+        assert!(read(large.len() as u64 - 1).is_none());
+    }
+
     /// Catches the walk going back up into a directory other than the one it came
     /// from (a parent renamed away and replaced while it was below).
     #[test]

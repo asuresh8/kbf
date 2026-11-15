@@ -106,6 +106,7 @@ pub(super) fn check(js: &mut JsAgentFlags, beside: &Beside<'_>) -> Result<Vec<St
 
     let config = &mut js.config;
     config.task_out = task.out.clone();
+    config.max_object_entries = task.max_object_entries;
     fit_wall(config, task.url_slack)?;
 
     let put_https = task.put_endpoint.starts_with("https://");
@@ -163,6 +164,7 @@ pub(super) fn check(js: &mut JsAgentFlags, beside: &Beside<'_>) -> Result<Vec<St
 fn check_put_dir(js: &mut JsAgentFlags, put_dir: &PutDirFlags) -> Result<Vec<String>, String> {
     let config = &mut js.config;
     config.task_out = TaskOut::PutDir(put_dir.roots.clone());
+    config.max_object_entries = put_dir.max_object_entries;
     fit_wall(config, put_dir.url_slack)?;
     Ok(Vec::new())
 }

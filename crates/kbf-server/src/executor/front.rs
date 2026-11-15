@@ -440,6 +440,7 @@ impl Ingest for Front {
         let limits = kbf_front::UntrustedLimits {
             max_pack_bytes: limits.max_pack_bytes,
             max_blob_bytes: limits.max_blob_bytes,
+            max_object_entries: limits.max_object_entries,
             ..kbf_front::UntrustedLimits::default()
         };
         let (packs, backend, mint) = (&self.parts.packs, &self.parts.backend, &self.parts.mint);

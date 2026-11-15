@@ -22,6 +22,8 @@ pub struct UntrustedLimits {
     pub max_pack_bytes: u64,
     /// The most bytes one blob in it holds.
     pub max_blob_bytes: u64,
+    /// The most records of a one-pass object.
+    pub max_object_entries: usize,
 }
 
 /// Why a pack was refused. Every reason is the farm's to run again with a new key.

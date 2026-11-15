@@ -560,6 +560,7 @@ impl HostWorker {
         let limits = UntrustedLimits {
             max_pack_bytes: ctx.cfg.max_pack_bytes,
             max_blob_bytes: ctx.cfg.max_blob_bytes,
+            max_object_entries: ctx.cfg.max_object_entries,
         };
         let handle =
             tokio::spawn(async move { ingest.ingest(lease, &key, &action, &limits).await });

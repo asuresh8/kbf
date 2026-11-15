@@ -69,6 +69,7 @@ const LARGE_MAX_BYTES: &str = "task_large_max_bytes";
 const OUT_MODE: &str = "task_out_mode";
 const OUT_ROOT: &str = "task_out_root";
 const OUT_FORMAT: &str = "task_out_format";
+const MAX_OBJECT_ENTRIES: &str = "task_max_object_entries";
 const ONE_PASS: &str = "one-pass";
 const PRESIGNED: &str = "presigned";
 const PACKS: &str = "packs";
@@ -103,8 +104,8 @@ const MAX_SECS: u64 = kbf_front::prepare_run::MAX_EXPIRY.as_secs();
 /// The most bytes a secret file or a credentials file may hold.
 const MAX_FILE_BYTES: usize = 4096;
 
-/// The seventeen flags.
-pub(super) fn args() -> [Arg; 17] {
+/// The eighteen flags.
+pub(super) fn args() -> [Arg; 18] {
     [
         Arg::new(SECRET)
             .long("task-secret-file")
@@ -300,6 +301,18 @@ pub(super) fn args() -> [Arg; 17] {
                  mount root; each run's directory is `<mp>/put/cas/b/<lease>/<nonce>`, and its \
                  action tree `<mp>/trees/<digest>`",
             ),
+        Arg::new(MAX_OBJECT_ENTRIES)
+            .long("task-max-object-entries")
+            .value_name("ENTRIES")
+            .value_parser(clap::value_parser!(u32).range(1..))
+            // kbf_front::MAX_UNTRUSTED_OBJECT_ENTRIES, as above.
+            .default_value("1048576")
+            .help(
+                "With `--task-out-mode put-dir` and `--task-out-format one-pass`: the most \
+                 records one object of a run may index. A larger index is refused as too large \
+                 before it is read, so this bounds what the frontend reads to trust an object \
+                 (52 bytes a record)",
+            ),
         Arg::new(OUT_FORMAT)
             .long("task-out-format")
             .value_name("FORMAT")
@@ -342,6 +355,8 @@ pub struct TaskFlags {
     pub url_slack: Duration,
     /// `--task-closure-max-digests`.
     pub max_digests: usize,
+    /// `--task-max-object-entries`.
+    pub max_object_entries: usize,
     /// `--task-closure-max-bytes`.
     pub max_bytes: u64,
     /// `--task-max-packs`.
@@ -400,6 +415,7 @@ pub(super) fn from_matches(m: &ArgMatches) -> Result<Option<TaskFlags>, String> 
         run_wall: secs(RUN_WALL),
         url_slack: secs(URL_SLACK),
         max_digests: usize::try_from(digests).unwrap_or(usize::MAX),
+        max_object_entries: entries_of(m),
         max_bytes: m.get_one::<u64>(MAX_BYTES).copied().unwrap_or_default(),
         max_packs: m.get_one::<u8>(MAX_PACKS).copied().unwrap_or_default(),
         max_large: m.get_one::<u8>(MAX_LARGE).copied().unwrap_or_default(),
@@ -471,6 +487,8 @@ pub struct PutDirFlags {
     pub url_slack: Duration,
     /// `--task-closure-max-digests`.
     pub max_digests: usize,
+    /// `--task-max-object-entries`.
+    pub max_object_entries: usize,
     /// `--task-closure-max-bytes`.
     pub max_bytes: u64,
 }
@@ -498,6 +516,7 @@ pub(super) fn put_dir_from_matches(m: &ArgMatches) -> Result<Option<PutDirFlags>
             .map_err(|error| format!("--task-out-root: {error}"))?,
         url_slack: Duration::from_secs(m.get_one::<u64>(URL_SLACK).copied().unwrap_or_default()),
         max_digests: usize::try_from(digests).unwrap_or(usize::MAX),
+        max_object_entries: entries_of(m),
         max_bytes: m.get_one::<u64>(MAX_BYTES).copied().unwrap_or_default(),
     }))
 }
@@ -552,6 +571,15 @@ fn out_of(m: &ArgMatches) -> Result<TaskOut, String> {
         ),
         None => Ok(TaskOut::Presigned),
     }
+}
+
+/// What `--task-max-object-entries` says.
+fn entries_of(m: &ArgMatches) -> usize {
+    let entries = m
+        .get_one::<u32>(MAX_OBJECT_ENTRIES)
+        .copied()
+        .unwrap_or_default();
+    usize::try_from(entries).unwrap_or(usize::MAX)
 }
 
 /// What `--task-out-format` says.

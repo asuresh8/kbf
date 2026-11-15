@@ -345,6 +345,8 @@ task-janitor-page-size = 500
 task-large-max-bytes = 536870912
 # The large-object keys each run of presigned writes gets, 0 to 8 (`cas/b/<lease>/<nonce>-L<i>`): an output blob over 64 MiB is written whole to one of them. A ceiling, as for `--task-max-packs`. Without `--task-large-credentials-file` no run gets one, whatever this says. Used only with `--task-secret-file`
 task-max-large = 8
+# With `--task-out-mode put-dir` and `--task-out-format one-pass`: the most records one object of a run may index. A larger index is refused as too large before it is read, so this bounds what the frontend reads to trust an object (52 bytes a record)
+task-max-object-entries = 1048576
 # The pack keys each run of presigned writes gets, 1 to 8 (`cas/b/<lease>/<nonce>-<k>`): a ceiling, not a prediction, since the sizes of a run's outputs are not known before it runs; a key a task does not write is never used. Used only with `--task-secret-file`
 task-max-packs = 8
 # With `--task-out-mode put-dir`: what the task writes. `packs`: packs and large objects planned from the digests, as every release before the one-pass object does. `one-pass`: one object per action, written while the outputs are read, its manifest and index at the end (docs/design/one-pass-task-object.md). This frontend reads both; set `one-pass` only once every frontend and every task image is this release or later, since a task image that does not know it is refused its flag. Refused with `--task-out-mode presigned`

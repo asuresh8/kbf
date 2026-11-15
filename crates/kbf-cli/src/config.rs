@@ -277,6 +277,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "task-large-credentials-file",
             "task-large-max-bytes",
             "task-max-large",
+            "task-max-object-entries",
             "task-max-packs",
             "task-out-format",
             "task-out-mode",

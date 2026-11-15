@@ -561,7 +561,8 @@ pub(crate) async fn collected(
     sandbox::notice(&cli.action, &ran.sandbox)
         .into_iter()
         .for_each(|line| eprintln!("{line}"));
-    if network != network::Network::Allowed {
+    // Nothing is said of a job's Command: no layer is made, and nothing is unusual.
+    if network != network::Network::Allowed && ran.layers != network::Layers::Job {
         eprintln!("{}", network::layers_notice(&cli.action, &ran.layers));
     }
 

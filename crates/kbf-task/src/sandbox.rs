@@ -124,10 +124,11 @@ impl std::fmt::Display for Sandbox {
 }
 
 /// The line written to standard error once the Command has been started, naming how its
-/// sandbox came out; none where there is no sandbox ([`Sandbox::Unavailable`]).
+/// sandbox came out; none where there is no sandbox ([`Sandbox::Unavailable`]) and none in a job
+/// ([`Sandbox::Job`]), where nothing is made and nothing is unusual.
 #[must_use]
 pub fn notice(action: &Digest, sandbox: &Sandbox) -> Option<String> {
-    (*sandbox != Sandbox::Unavailable)
+    (!matches!(sandbox, Sandbox::Unavailable | Sandbox::Job))
         .then(|| format!("kbf-task: action {action}: sandbox: {sandbox}"))
 }
 

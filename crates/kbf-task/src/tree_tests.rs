@@ -600,6 +600,35 @@ async fn a_tree_jobs_command_sees_the_tree_root_with_nothing_covered() {
     );
 }
 
+/// Asserts that a directory output holding a file over the record cap packs, validates and is
+/// stored: the file goes to a large slot though no output names its digest (the directory's tree
+/// does). The farm's `zig_unpack` is such an action (a 172 MB file in a directory output); it
+/// failed with `invalid-manifest: large slot 0 holds ..., which no output names`.
+#[tokio::test]
+async fn a_directory_output_with_a_file_over_the_record_cap_packs_and_validates() {
+    let dir = scratch("big-in-dir");
+    let command = command(&["true"], "", &["d"]);
+    let digest = lay_out(&dir, &action_of(&command), &command);
+    std::fs::create_dir(dir.join("work/d")).expect("d");
+    let big = std::fs::File::create(dir.join("work/d/big")).expect("big");
+    let size = kbf_task_pack::MAX_RECORD_BYTES + 1;
+    big.set_len(size).expect("sparse");
+    let sink = Fake::with_slots(1, 1);
+    let cli = tree_cli(&dir, &digest);
+    let manifest = execute(&cli, root_of(&cli), &sink).await.expect("task");
+    assert_eq!(manifest.exit_code, 0);
+    assert_eq!(manifest.output_directories.len(), 1);
+    assert_eq!(manifest.large.len(), 1);
+    assert_eq!(manifest.large[0].size(), size);
+    let puts = sink.puts.lock().unwrap();
+    assert!(
+        puts.iter().any(
+            |put| matches!(put, crate::task::recording_sink::Put::Large { len, .. } if *len == size)
+        ),
+        "{puts:?}"
+    );
+}
+
 /// Asserts that a sink with more pack slots than a manifest can name is a setup failure before
 /// the tree is read.
 #[tokio::test]

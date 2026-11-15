@@ -196,8 +196,8 @@ directly. The Command sees the job's root as it is, with `/run/js-files` empty (
 URL, no grant and no secret), the run's `/.kbf-run` (its streams and `private/`) and the put
 directory `/out`, which is writable (it is the job's own output path). The task ends the Command's
 process group when it exits or the timeout passes, and is the subreaper that kills and reaps every
-process it left, `setsid` included, before the outputs are read. The job log has the line
-`kbf-task: action <digest>: sandbox: none (the job is the sandbox)`.
+process it left, `setsid` included, before the outputs are read. The job log has no sandbox or
+network line for it: nothing is made, so nothing is unusual.
 
 Today's job (the grant mode, without `--tree`) keeps its sandbox. The task tool starts the Command
 in mount and PID namespaces of its own (`crates/kbf-task/src/sandbox.rs`), made by the same `unshare`

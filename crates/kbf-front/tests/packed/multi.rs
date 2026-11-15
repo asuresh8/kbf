@@ -339,6 +339,28 @@ impl Multi {
         (manifest.clone(), Self::pack_zero(&manifest, &records))
     }
 
+    /// The manifest and pack 0 of a run of one pack and the large object in slot 0, which no
+    /// output file names: the output directory's tree names it when `in_tree`, else nothing
+    /// does. The large object's digest too.
+    pub(crate) fn large_in_tree(&self, in_tree: bool) -> (TaskManifest, Vec<u8>, Digest) {
+        let p = &self.p;
+        let digest = large().1;
+        let mut manifest = self.manifest(1, &[]);
+        manifest.large = vec![LargeEntry { slot: 0, digest }];
+        let mut files = vec![sha256(&p.in_dir)];
+        if in_tree {
+            files.push(digest);
+        }
+        let tree = tree_of(&files);
+        manifest.output_directories[0].tree = tree.0;
+        let records: [&[u8]; 5] = [&p.alpha, &p.beta, &p.stdout, &tree.1, &p.in_dir];
+        (
+            manifest.clone(),
+            Self::pack_zero(&manifest, &records),
+            digest,
+        )
+    }
+
     pub(crate) fn pack_key(&self, at: usize) -> &IssuedPackKey {
         &self.keys.packs()[at]
     }

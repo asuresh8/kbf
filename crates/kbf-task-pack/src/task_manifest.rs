@@ -227,14 +227,6 @@ pub enum ManifestError {
         /// The cap the reader was given.
         cap: u64,
     },
-    /// A large entry that no output names.
-    #[error("large slot {slot} holds {digest}, which no output names")]
-    LargeUnnamed {
-        /// The slot.
-        slot: u8,
-        /// The digest given.
-        digest: Digest,
-    },
     /// The lease is not a build id.
     #[error("the lease: {0}")]
     Lease(#[from] TaskKeyError),
@@ -787,10 +779,9 @@ impl TaskManifest {
             if !digests.insert(entry.digest) {
                 return Err(ManifestError::DuplicateLargeDigest(entry.digest));
             }
-            if !self.output_digests().any(|d| d == entry.digest) {
-                let digest = entry.digest;
-                return Err(ManifestError::LargeUnnamed { slot, digest });
-            }
+            // The digest is not required to be an output's: a file inside an output directory's
+            // `Tree` over the record cap is a large object too. A reader that holds the trees
+            // checks it is one or the other.
         }
         Ok(())
     }

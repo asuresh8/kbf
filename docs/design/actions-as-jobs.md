@@ -386,8 +386,8 @@ outputs are read:
   needed): once the Command has ended, every child it holds, a process that left the group with `setsid` included,
   is killed and reaped, until it has none.
 
-What a job's Command sees: see 3.2. The line `kbf-task: action <digest>: sandbox: none (the job is the sandbox)` is
-in the job log. Today's job (grant mode, no `--tree`: the legacy daemon's) keeps the sandbox it had: its own
+What a job's Command sees: see 3.2. The job log has no sandbox or network line for it (nothing is made, so nothing is
+unusual). Today's job (grant mode, no `--tree`: the legacy daemon's) keeps the sandbox it had: its own
 user, network, mount and PID namespaces, with `/run/js-files` and `/scratch` covered, `private/` bound at `/tmp`,
 `/var/tmp`, `/run` and `/root`, and a PID namespace through the relay (the `sandbox` module).
 

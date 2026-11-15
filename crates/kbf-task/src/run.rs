@@ -374,7 +374,7 @@ async fn run_job(
     let mut ends_group = GroupKill(group);
     drop(process);
     // While the Command runs, what its processes leave is reaped as it ends, not at the end.
-    let reaper = chld.map(|chld| crate::orphans::reap_others(chld, group));
+    let reaper = start_reaper(chld, group);
     let (status, timed_out) = wait_ending(&mut child, group, deadline).await;
     if let Some(reaper) = reaper {
         reaper.abort();
@@ -413,10 +413,28 @@ fn watch_children(job: Job) -> std::io::Result<Option<tokio::signal::unix::Signa
         .transpose()
 }
 
+/// Starts reaping the children but `command` as they end (Linux), if `chld` is a listener.
+#[cfg(target_os = "linux")]
+fn start_reaper(
+    chld: Option<tokio::signal::unix::Signal>,
+    command: Option<u32>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    chld.map(|chld| crate::orphans::reap_others(chld, command))
+}
+
 /// No subreaper elsewhere: nothing to reap while the Command runs.
 #[cfg(not(target_os = "linux"))]
 fn watch_children(_: Job) -> std::io::Result<Option<tokio::signal::unix::Signal>> {
     Ok(None)
+}
+
+/// No subreaper elsewhere: nothing to reap while the Command runs.
+#[cfg(not(target_os = "linux"))]
+fn start_reaper(
+    _: Option<tokio::signal::unix::Signal>,
+    _: Option<u32>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
 }
 
 /// Linux only: no subreaper elsewhere, so the group kill alone is kept.

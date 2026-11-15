@@ -224,7 +224,7 @@ impl OutDir {
     pub fn object(&self) -> Result<ObjectRun<'_>, Failure> {
         let mut stage = Stage::new(self);
         let name = OBJECT_NAME;
-        let part = self.dir.join(part_name(&name));
+        let part = self.dir.join(part_name(name));
         let file = (self.create)(&part).map_err(|source| OutDirError::Create {
             name: name.to_owned(),
             source,
@@ -269,7 +269,7 @@ impl ObjectRun<'_> {
             return Err(PackError::missing(&digest).into());
         }
         manifest.timing.walk_ms = Some(manifest.timing.pack_ms);
-        let files = spool.files(manifest).await.map_err(write_error(&name))?;
+        let files = spool.files(manifest).await.map_err(write_error(name))?;
         let json = manifest
             .to_json_with(MAX_LARGE_BYTES)
             .map_err(PackError::from)?;
@@ -277,8 +277,8 @@ impl ObjectRun<'_> {
         let written = ended
             .map_err(io::Error::other)
             .and_then(|done| done)
-            .map_err(write_error(&name))?;
-        stage.commit(&name, &written.object)
+            .map_err(write_error(name))?;
+        stage.commit(name, &written.object)
     }
 }
 

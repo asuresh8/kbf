@@ -6,6 +6,10 @@
 //! sections 2 and 3). The ingest is [`super::ingest_set`]'s over every key the directory can hold
 //! (`pack` to `pack7`, `L0` to `L7`), with a lighter proof ([`Proof::Manifest`]):
 //!
+//! - **One object.** When pack 0 ends in the trailer of a one-pass object (a task told to write
+//!   `--object-format one-pass`), the run is one object with no other pack and no large object, and
+//!   [`super::one_pass`] ingests it: the trailer, then the manifest and the index in one range, no
+//!   record, one row in the pack index for every record. The steps below are those of the packs.
 //! - **What it reads.** Pack 0's length, trailer, footer and record 0 (the manifest, checked
 //!   against its CRC-32C and SHA-256), the footer of each other pack the manifest names, and the
 //!   length of each large object. No other record of a pack is read: neither the output trees
@@ -58,6 +62,24 @@ pub async fn ingest_put_dir(
     action: &Digest,
     limits: &UntrustedLimits,
 ) -> Ingested {
+    ingest_put_dir_with(packs, backend, mint, lease, dir, action, limits, None).await
+}
+
+/// [`ingest_put_dir`] that also publishes, for a one-pass object, the tierstore manifests of its
+/// output directories through `publish` (the frontend's action-tree writer), so that a later
+/// input root holding an equal subtree finds them in its memo. A manifest that cannot be
+/// published is logged and costs only that reuse; the run is ingested all the same.
+#[allow(clippy::too_many_arguments)] // The arguments of `ingest_put_dir`, and the writer.
+pub async fn ingest_put_dir_with(
+    packs: &Packs,
+    backend: &Backend,
+    mint: &PackKeyMint,
+    lease: &str,
+    dir: &IssuedPutDir,
+    action: &Digest,
+    limits: &UntrustedLimits,
+    publish: Option<&crate::action_tree::TreeWriter>,
+) -> Ingested {
     let keys = dir.key_set();
     let done = Ingest {
         packs,
@@ -68,6 +90,7 @@ pub async fn ingest_put_dir(
         action,
         limits,
         proof: Proof::Manifest,
+        publish,
     };
     let ingested = ended(packs, done).await;
     if matches!(ingested, Ingested::Ran { .. }) {

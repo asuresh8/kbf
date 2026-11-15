@@ -1,6 +1,7 @@
 //! Behaviour tests of the task pack types: the golden fixtures and the refusals.
 
 mod objects;
+mod one_pass;
 mod pack_layout;
 mod pack_layout_digests;
 mod put_dir_key;

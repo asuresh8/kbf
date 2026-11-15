@@ -440,14 +440,18 @@ impl Ingest for Front {
         let limits = kbf_front::UntrustedLimits {
             max_pack_bytes: limits.max_pack_bytes,
             max_blob_bytes: limits.max_blob_bytes,
+            max_object_entries: limits.max_object_entries,
+            max_object_manifest_bytes: limits.max_object_manifest_bytes,
+            object_bytes_per_entry: limits.object_bytes_per_entry,
             ..kbf_front::UntrustedLimits::default()
         };
         let (packs, backend, mint) = (&self.parts.packs, &self.parts.backend, &self.parts.mint);
         let build = build_id(lease);
         let done = match key {
             Issued::PutDir(dir) => {
-                kbf_front::ingest_put_dir(packs, backend, mint, &build, &dir, &action, &limits)
-                    .await
+                let writer = self.parts.put_dir.as_ref().map(|parts| &parts.writer);
+                let ingest = kbf_front::ingest_put_dir_with;
+                ingest(packs, backend, mint, &build, &dir, &action, &limits, writer).await
             }
             Issued::Key(key) => {
                 kbf_front::ingest(packs, backend, mint, &build, &key, &action, &limits).await

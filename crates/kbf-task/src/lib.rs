@@ -155,6 +155,7 @@
 pub(crate) mod child;
 pub mod digest;
 pub mod fetch;
+pub mod files;
 mod inputs;
 pub mod network;
 #[cfg(target_os = "linux")]
@@ -171,7 +172,9 @@ pub mod put_urls;
 pub mod relay;
 pub mod run;
 pub mod sandbox;
+pub mod spool;
 pub mod task;
+mod task_util;
 pub mod tree;
 
 #[cfg(test)]

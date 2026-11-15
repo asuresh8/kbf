@@ -151,6 +151,13 @@ pub struct Config {
     pub max_pack_bytes: u64,
     /// The most bytes of one blob in a pack.
     pub max_blob_bytes: u64,
+    /// The most records of a one-pass object (`--task-max-object-entries`).
+    pub max_object_entries: usize,
+    /// The most bytes of a one-pass object's manifest (`--task-max-object-manifest-bytes`).
+    pub max_object_manifest_bytes: u64,
+    /// The bytes of a one-pass object's tail a record may account for
+    /// (`--task-object-bytes-per-entry`).
+    pub object_bytes_per_entry: u64,
     /// The longest a pack url may stay good: the store's presign ceiling.
     pub presign_ceiling: Duration,
     /// The network every job is given (`--executor-network`).
@@ -256,6 +263,9 @@ impl Config {
             locate: false,
             max_pack_bytes: 128 << 20,
             max_blob_bytes: 64 << 20,
+            max_object_entries: 1 << 20,
+            max_object_manifest_bytes: 4 << 20,
+            object_bytes_per_entry: 1024,
             presign_ceiling: PRESIGN_LIMIT,
             network: Network::AllowList,
             allow_open_network: false,

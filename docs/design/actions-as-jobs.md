@@ -539,6 +539,9 @@ create-only PUT per key, and the ingest of `ingest_set` (`crates/kbf-front/src/p
 writes counted in section 10 with no ingest refusals it did not explain), the packs go with today's job (7.2): the
 task's pack writer and PUTs, the presign key, and the `cas/b/` ingest.
 
+The put-directory writer's own shape (one object per action, written in one pass, manifest and index at the end) is
+[one-pass-task-object.md](one-pass-task-object.md).
+
 ## 6. Failures and retries
 
 Every row ends in one of the farm's existing classes (`executor/outcome.rs`, then `answer.rs`), so the client's

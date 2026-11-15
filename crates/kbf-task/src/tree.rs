@@ -43,9 +43,11 @@ use crate::inputs::{Inputs, network_of};
 use crate::out_dir::OutDir;
 use crate::plan::Limits;
 use crate::run::RunError;
+use crate::spool::ObjectFormat;
 use crate::task::{
     Cli, Failure, HttpSink, PackSink, check_argv_secrets, check_lease, check_slots, collected,
-    complete, exit_code, http_sink, millis, named, put_urls, sink_limits, trusted_roots,
+    collected_into, complete, exit_code, http_sink, millis, named, put_urls, sink_limits,
+    trusted_roots,
 };
 
 /// The Action's file, under the tree's root.
@@ -157,6 +159,14 @@ pub async fn execute_out_dir(
     out: &OutDir,
     limits: &Limits,
 ) -> Result<TaskManifest, Failure> {
+    if cli.object_format == Some(ObjectFormat::OnePass) {
+        // One object, written as the outputs are read: no slots, so no limits.
+        let inputs = read(cli, root)?;
+        let object = out.object()?;
+        let (mut manifest, _) = collected_into(cli, inputs, limits, Some(object.spool())).await?;
+        object.finish(&mut manifest).await?;
+        return Ok(manifest);
+    }
     check_slots(limits)?;
     let inputs = read(cli, root)?;
     let (mut manifest, blobs) = collected(cli, inputs, limits).await?;

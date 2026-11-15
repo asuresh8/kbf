@@ -54,6 +54,7 @@ pub use adopt::{
 pub use cache::ReadCache;
 pub use digest::blob_digest;
 pub use error::{CacheError, PackError, ReadError};
+pub use kbf_task_pack::one_pass;
 pub use kbf_task_pack::{
     BlobMeta, EMPTY_DIGEST, InputStats, InputsFrom, KeyLayout, LargeEntry, LayoutError,
     LayoutWriteError, MAC_LEN, MANIFEST_VERSION, MANIFEST_VERSION_2, MANIFEST_VERSION_3,

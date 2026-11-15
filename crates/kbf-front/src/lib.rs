@@ -84,6 +84,7 @@ pub mod large_backfill;
 mod meta_log;
 pub mod metrics;
 mod operations;
+mod output_index;
 pub mod prepare_run;
 mod proxy;
 mod qos_header;
@@ -148,7 +149,7 @@ pub use crate::proxy::{
     MAX_UNTRUSTED_READ_BYTES, MAX_UPLOAD_IDLE_TIMEOUT, MIN_SECRET_BYTES, Meter, Method, MintError,
     Owner, Owners, PackKeyMint, PackMetrics, PackSettings, PackStore, Packs, Pieces, Proxy,
     RejectReason, StoreError, Stored, UntrustedLimits, VerifyingKeys, ingest, ingest_put_dir,
-    ingest_set, large_key,
+    ingest_put_dir_with, ingest_set, large_key,
 };
 pub use crate::qos_header::{BadQosAllow, QOS_HEADER, QosAllow};
 pub use crate::recorder::{

@@ -76,6 +76,8 @@ fn locked(pass: &Mutex<Pass>) -> MutexGuard<'_, Pass> {
 pub(super) struct Large<'a> {
     packs: &'a Packs,
     object: ObjectKey,
+    /// Where the blob starts in the object: 0 for an object of its own.
+    base: u64,
     digest: Digest,
     pass: Arc<Mutex<Pass>>,
 }
@@ -83,9 +85,17 @@ pub(super) struct Large<'a> {
 impl<'a> Large<'a> {
     /// The object under `key`, which the manifest says is the blob `digest`.
     pub(super) fn new(packs: &'a Packs, key: &IssuedPackKey, digest: Digest) -> Self {
+        Self::at(packs, key, 0, digest)
+    }
+
+    /// The blob `digest` that lies at `base` in the object under `key`, a one-pass object that
+    /// holds other blobs too. [`Large::check_length`] is not for it: the index of the object was
+    /// checked to hold the blob inside it.
+    pub(super) fn at(packs: &'a Packs, key: &IssuedPackKey, base: u64, digest: Digest) -> Self {
         Self {
             packs,
             object: key.object.clone(),
+            base,
             digest,
             pass: Arc::default(),
         }
@@ -160,6 +170,7 @@ impl<'a> Large<'a> {
         let reading = Reading {
             packs: self.packs.clone(),
             object: self.object.clone(),
+            base: self.base,
             digest: self.digest,
             at: 0,
             pass: Arc::clone(&self.pass),
@@ -228,6 +239,7 @@ impl<'a> Large<'a> {
 struct Reading {
     packs: Packs,
     object: ObjectKey,
+    base: u64,
     digest: Digest,
     at: u64,
     pass: Arc<Mutex<Pass>>,
@@ -254,7 +266,7 @@ impl Reading {
             return Ok(None);
         }
         let want = WINDOW_BYTES.min(size - self.at);
-        let range = ByteRange::new(self.at, want).expect("a window has bytes");
+        let range = ByteRange::new(self.base + self.at, want).expect("a window has bytes");
         match self.packs.fetch(&self.object, range).await {
             Ok(bytes) if bytes.len() as u64 == want => {
                 locked(&self.pass).hasher.update(&bytes);

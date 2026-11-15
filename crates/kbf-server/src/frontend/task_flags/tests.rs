@@ -245,6 +245,9 @@ fn flags(dir: &Path) -> TaskFlags {
         run_wall: Duration::from_secs(DEFAULT_RUN_WALL_SECS),
         url_slack: Duration::from_secs(DEFAULT_URL_SLACK_SECS),
         max_digests: ClosureLimits::DEFAULT.max_digests,
+        max_object_entries: 1 << 20,
+        max_object_manifest_bytes: 4 << 20,
+        object_bytes_per_entry: 1024,
         max_bytes: ClosureLimits::DEFAULT.max_bytes,
         max_packs: 8,
         max_large: 8,
@@ -556,6 +559,90 @@ fn the_output_mode_is_presigned_or_a_put_dir_under_its_root() {
     );
 }
 
+/// Asserts `--task-out-format`: `packs` by default and when given, `one-pass` reaching the roots
+/// of the put-directory setting both ways the flags make it (with the presigned flags and
+/// without), a value that is neither refused, and `one-pass` with the presigned mode refused
+/// rather than ignored.
+#[test]
+fn the_out_format_is_packs_unless_one_pass_is_asked_for() {
+    let put_dir = |more: &[&str]| {
+        let mut flags = PUT_DIR_ONLY.to_vec();
+        flags.extend_from_slice(more);
+        parsed(&flags)
+            .expect("parses")
+            .put_dir
+            .expect("put-dir")
+            .roots
+    };
+    assert_eq!(put_dir(&[]).format(), OutFormat::Packs);
+    assert_eq!(
+        put_dir(&["--task-out-format=packs"]).format(),
+        OutFormat::Packs
+    );
+    assert_eq!(
+        put_dir(&["--task-out-format=one-pass"]).format(),
+        OutFormat::OnePass
+    );
+
+    let task = |more: &[&str]| {
+        let mut flags = TASK.to_vec();
+        flags.extend_from_slice(&["--task-out-mode=put-dir", "--task-out-root=/mnt/ts/put"]);
+        flags.extend_from_slice(more);
+        match parsed(&flags)
+            .expect("parses")
+            .task
+            .expect("task flags")
+            .out
+        {
+            TaskOut::PutDir(roots) => roots.format(),
+            TaskOut::Presigned => panic!("a put directory was asked for"),
+        }
+    };
+    assert_eq!(task(&[]), OutFormat::Packs);
+    assert_eq!(task(&["--task-out-format=one-pass"]), OutFormat::OnePass);
+
+    let mut flags = TASK.to_vec();
+    flags.push("--task-out-format=tar");
+    assert_eq!(
+        parsed(&flags).expect_err("refused").kind(),
+        ErrorKind::InvalidValue
+    );
+    let mut flags = TASK.to_vec();
+    flags.push("--task-out-format=one-pass");
+    let refusal = parsed(&flags).expect_err("refused").to_string();
+    assert!(
+        refusal.contains("--task-out-format one-pass is only for"),
+        "{refusal}"
+    );
+}
+
+/// Asserts `--task-max-object-entries`: 1,048,576 by default (what the ingest's own default is),
+/// the given value in both settings the flags make, and 0 refused.
+#[test]
+fn the_object_entry_limit_is_a_flag_with_the_ingests_default() {
+    let put_dir = |more: &[&str]| {
+        let mut flags = PUT_DIR_ONLY.to_vec();
+        flags.extend_from_slice(more);
+        parsed(&flags)
+            .expect("parses")
+            .put_dir
+            .expect("put-dir")
+            .max_object_entries
+    };
+    assert_eq!(put_dir(&[]), 1 << 20);
+    assert_eq!(put_dir(&["--task-max-object-entries=7"]), 7);
+    let mut flags = TASK.to_vec();
+    flags.push("--task-max-object-entries=9");
+    let task = parsed(&flags).expect("parses").task.expect("task flags");
+    assert_eq!(task.max_object_entries, 9);
+    let mut flags = TASK.to_vec();
+    flags.push("--task-max-object-entries=0");
+    assert_eq!(
+        parsed(&flags).expect_err("refused").kind(),
+        ErrorKind::ValueValidation
+    );
+}
+
 /// The two flags a put-directory frontend is given.
 const PUT_DIR_ONLY: [&str; 3] = [
     "--task-secret-file=/etc/kbf/task.secret",
@@ -643,6 +730,9 @@ fn put_dir_flags(dir: &Path) -> PutDirFlags {
         roots: PutDirRoots::new("/mnt/ts/put").expect("roots"),
         url_slack: Duration::from_secs(DEFAULT_URL_SLACK_SECS),
         max_digests: ClosureLimits::DEFAULT.max_digests,
+        max_object_entries: 1 << 20,
+        max_object_manifest_bytes: 4 << 20,
+        object_bytes_per_entry: 1024,
         max_bytes: ClosureLimits::DEFAULT.max_bytes,
     }
 }

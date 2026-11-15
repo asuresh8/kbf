@@ -31,7 +31,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Parser};
-use kbf_proto::reapi::{self, Action};
+#[cfg(test)]
+use kbf_proto::reapi::Action;
 use kbf_segments::sha256;
 use kbf_task_pack::{
     MAX_LARGE, MAX_PACKS, OutputDirectory, OutputFile, OutputSymlink, TaskManifest, Timing, Usage,
@@ -54,6 +55,7 @@ use crate::put::{
 use crate::put_urls::PutUrls;
 use crate::run::{Job, Run, RunError, output_paths, run};
 use crate::sandbox;
+use crate::spool::{self, ObjectFormat, Spool};
 
 /// Exit code: an input could not be read, checked or laid out.
 pub const EXIT_FETCH: u8 = 10;
@@ -163,6 +165,18 @@ pub struct Cli {
         conflicts_with_all = ["pack_url_file", "pack_url", "put_urls_file", "put_urls"]
     )]
     pub out_dir: Option<PathBuf>,
+    /// The shape of what `--stage-and-commit` writes: `packs` (the default, as when the flag is
+    /// left out) the pack and large objects planned from the digests, or `one-pass` the single
+    /// object `pack` written while the outputs are read, its manifest and index at the end
+    /// (`crate::spool`, docs/design/one-pass-task-object.md). The frontend that reads the
+    /// objects must know the one-pass format before a task is told to write it. Refused with the
+    /// URL flags, one of which a run without `--stage-and-commit` must give.
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with_all = ["pack_url_file", "pack_url", "put_urls_file", "put_urls"]
+    )]
+    pub object_format: Option<ObjectFormat>,
     /// The base URL of the read grant: blobs are read from `<base>/<hex>/<size>`. Required, with
     /// `--grant-token-file` or `--grant-token`, unless `--tree` is given.
     #[arg(
@@ -532,6 +546,17 @@ pub(crate) async fn collected(
     inputs: Inputs,
     limits: &Limits,
 ) -> Result<(TaskManifest, Blobs), Failure> {
+    collected_into(cli, inputs, limits, None).await
+}
+
+/// [`collected`] writing the blobs into `spool` as they are read, when there is one: the
+/// returned blobs are then empty and `limits` bound nothing.
+pub(crate) async fn collected_into(
+    cli: &Cli,
+    inputs: Inputs,
+    limits: &Limits,
+    spool: Option<&Arc<Spool>>,
+) -> Result<(TaskManifest, Blobs), Failure> {
     let Inputs {
         action,
         command,
@@ -573,16 +598,28 @@ pub(crate) async fn collected(
 
     let packing = Instant::now();
     let paths: Vec<String> = output_paths(&command).into_iter().cloned().collect();
-    let outputs = collect_outputs(
-        &root,
-        &command.working_directory,
-        &paths,
-        &stdout,
-        &stderr,
-        cli.limits,
-        output_cap(limits),
-    )
-    .await?;
+    let outputs = match spool {
+        Some(spool) => {
+            let paths = (
+                root.as_path(),
+                command.working_directory.as_str(),
+                paths.as_slice(),
+            );
+            spool::collect(spool, paths, (&stdout, &stderr), cli.limits).await?
+        }
+        None => {
+            collect_outputs(
+                &root,
+                &command.working_directory,
+                &paths,
+                &stdout,
+                &stderr,
+                cli.limits,
+                output_cap(limits),
+            )
+            .await?
+        }
+    };
     // The manifest is part of pack 0, so the time to build the packs ends here.
     let pack_ms = millis(packing.elapsed());
     let result = &outputs.result;
@@ -672,42 +709,7 @@ fn store_outputs(
     Ok(())
 }
 
-/// The digest an Action field names, or a fetch failure saying which field is missing.
-pub(crate) fn named(
-    what: &str,
-    digest: Option<&reapi::Digest>,
-) -> Result<reapi::Digest, FetchError> {
-    digest
-        .cloned()
-        .ok_or_else(|| FetchError::Invalid(format!("the Action names no {what}")))
-}
-
-/// A result's digest as the manifest writes it.
-pub(crate) fn digest_of(digest: Option<&reapi::Digest>) -> Result<Digest, Failure> {
-    let digest = digest.ok_or_else(|| Failure::Result("a digest is absent".to_owned()))?;
-    digest::from_reapi(digest).map_err(|e| Failure::Result(e.to_string()))
-}
-
-/// A stream's digest as the manifest writes it: absent when the stream is empty.
-fn stdio(digest: Option<&reapi::Digest>) -> Result<Option<Digest>, Failure> {
-    Ok(Some(digest_of(digest)?).filter(|d| d.size_bytes != 0))
-}
-
-/// How long the Command may run: the Action's timeout when it sets a positive one, but never more
-/// than `cap`, the operator's limit; else `cap`.
-fn deadline(action: &Action, cap: Duration) -> Duration {
-    match &action.timeout {
-        Some(t) if t.seconds > 0 || (t.seconds == 0 && t.nanos > 0) => {
-            Duration::new(t.seconds.unsigned_abs(), t.nanos.unsigned_abs()).min(cap)
-        }
-        _ => cap,
-    }
-}
-
-/// A duration in whole milliseconds, saturating.
-pub(crate) fn millis(d: Duration) -> u64 {
-    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
-}
+pub(crate) use crate::task_util::{deadline, digest_of, millis, named, stdio};
 
 /// Refuses a credential given as a flag value unless `--insecure-argv-secrets` allows it. The
 /// message names the flags, never their values.

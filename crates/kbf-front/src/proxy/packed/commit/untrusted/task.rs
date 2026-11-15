@@ -99,6 +99,7 @@ use prost::Message as _;
 
 use super::large::Large;
 use super::metadata::claimed;
+use super::one_pass;
 use super::{CommitError, IssuedKeySet, IssuedPackKey, PackKeyMint, Packs, UntrustedLimits};
 use crate::backend::Backend;
 use crate::closure;
@@ -276,6 +277,7 @@ pub async fn ingest_set(
         action,
         limits,
         proof: Proof::EveryByte,
+        publish: None,
     };
     ended(packs, done).await
 }
@@ -325,14 +327,17 @@ pub(super) struct Ingest<'a> {
     pub(super) action: &'a Digest,
     pub(super) limits: &'a UntrustedLimits,
     pub(super) proof: Proof,
+    /// Where a one-pass object's output directories are published as tierstore manifests, if the
+    /// frontend writes action trees.
+    pub(super) publish: Option<&'a crate::action_tree::TreeWriter>,
 }
 
 /// What an ingest made of a run that ran.
-struct Ran {
-    result: ActionResult,
-    cached: bool,
-    packs: u64,
-    large_bytes: u64,
+pub(super) struct Ran {
+    pub(super) result: ActionResult,
+    pub(super) cached: bool,
+    pub(super) packs: u64,
+    pub(super) large_bytes: u64,
 }
 
 /// One pack of the run as far as its footer shows: its key, its length and its records.
@@ -365,8 +370,27 @@ impl Ingest<'_> {
             .hold(names)
             .map_err(|_| Stop::from(RejectReason::Claimed))?;
         let first = self.verified()?;
-        let size = self.length(&first.object).await?;
-        let (footer, entry) = self.footer(&first.object, size, true).await?;
+        let (size, known) = match self.proof {
+            Proof::EveryByte => (
+                self.length(&first.object, self.limits.max_pack_bytes)
+                    .await?,
+                None,
+            ),
+            // A put directory's pack 0 may be a one-pass object, which has no length cap: its
+            // end says which it is before any cap is applied.
+            Proof::Manifest => {
+                let size = self.length(&first.object, u64::MAX).await?;
+                let end = self.end_of(&first.object, size).await?;
+                if one_pass::is_one_pass(&end) {
+                    return self.one_pass(first, size, &end).await;
+                }
+                if size > self.limits.max_pack_bytes {
+                    return Err(RejectReason::TooLarge.into());
+                }
+                (size, Some(end))
+            }
+        };
+        let (footer, entry) = self.footer(&first.object, size, true, known).await?;
         let manifest = self.manifest(&first.object, &entry).await?;
         self.issued(&manifest)?;
         if self.proof == Proof::Manifest {
@@ -466,7 +490,7 @@ impl Ingest<'_> {
 
     /// Checks that the manifest names no more packs than the set has keys for and no large slot
     /// the set has no key for.
-    fn issued(&self, manifest: &TaskManifest) -> Step<()> {
+    pub(super) fn issued(&self, manifest: &TaskManifest) -> Step<()> {
         if usize::from(manifest.packs) > self.keys.packs().len() {
             return Err(RejectReason::BadManifest.into());
         }
@@ -481,25 +505,31 @@ impl Ingest<'_> {
         Ok(())
     }
 
+    /// The last bytes of the object, as many as a one-pass trailer (fewer for a shorter object).
+    async fn end_of(&self, object: &ObjectKey, size: u64) -> Step<bytes::Bytes> {
+        let len = size.min(one_pass::TAIL_LEN as u64);
+        self.read(object, size - len, len).await
+    }
+
     /// A pack beyond the first, read as far as its footer: an object that is not there is
     /// `Incomplete`.
     async fn second<'k>(&self, key: &'k IssuedPackKey) -> Step<Laid<'k>> {
         let laid = async {
-            let size = self.length(&key.object).await?;
-            let (footer, _) = self.footer(&key.object, size, false).await?;
+            let size = self.length(&key.object, self.limits.max_pack_bytes).await?;
+            let (footer, _) = self.footer(&key.object, size, false, None).await?;
             Ok::<_, Stop>(Laid { key, size, footer })
         };
         laid.await.map_err(Stop::absent_is_incomplete)
     }
 
     /// The length of the object, if it is there and under the cap.
-    async fn length(&self, object: &ObjectKey) -> Step<u64> {
+    pub(super) async fn length(&self, object: &ObjectKey, cap: u64) -> Step<u64> {
         let size = match self.packs.store.len(object).await {
             Ok(Some(size)) => size,
             Ok(None) => return Err(RejectReason::Missing.into()),
             Err(error) => return Err(unavailable(&format!("the length of {object}: {error}"))),
         };
-        if size > self.limits.max_pack_bytes {
+        if size > cap {
             return Err(RejectReason::TooLarge.into());
         }
         if size < TRAILER_LEN as u64 {
@@ -515,9 +545,14 @@ impl Ingest<'_> {
         object: &ObjectKey,
         size: u64,
         manifest: bool,
+        known: Option<bytes::Bytes>,
     ) -> Step<(Footer, IndexEntry)> {
         let trailer = TRAILER_LEN as u64;
-        let tail = self.read(object, size - trailer, trailer).await?;
+        let tail = match known {
+            // The end of the object, read already: its last `TRAILER_LEN` bytes.
+            Some(end) => end.slice(end.len() - TRAILER_LEN..),
+            None => self.read(object, size - trailer, trailer).await?,
+        };
         let wanted = Footer::len_from_trailer(&tail).map_err(|_| RejectReason::Malformed)?;
         if wanted > footer_len(self.limits.max_blobs as u64) {
             return Err(RejectReason::TooLarge.into());
@@ -621,7 +656,7 @@ impl Ingest<'_> {
 
     /// Writes `result` to the action cache if the action exited 0 and may be cached; whether it
     /// did.
-    async fn cached(&self, result: &ActionResult, exit_code: i32) -> Step<bool> {
+    pub(super) async fn cached(&self, result: &ActionResult, exit_code: i32) -> Step<bool> {
         if exit_code != 0 {
             return Ok(false);
         }
@@ -714,7 +749,7 @@ fn new_pack(key: &IssuedPackKey, footer: &Footer, size: u64) -> NewPack {
 /// The result the manifest describes, sorted by path as REAPI asks. It carries the manifest's
 /// digests (which, under [`Proof::EveryByte`], the pack's records have been hashed to) and the
 /// task's claimed timing as execution metadata ([`claimed`]), anchored at `end`.
-fn rebuilt(manifest: &TaskManifest, end: SystemTime) -> ActionResult {
+pub(super) fn rebuilt(manifest: &TaskManifest, end: SystemTime) -> ActionResult {
     let wire = digest_to_proto;
     let mut result = ActionResult {
         output_files: manifest

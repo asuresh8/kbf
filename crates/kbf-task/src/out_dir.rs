@@ -49,6 +49,8 @@ use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use kbf_task_pack::{LayoutWriteError, PackLayout, TaskManifest};
 use kbf_types::Digest;
 
@@ -57,6 +59,7 @@ use crate::outputs::Blobs;
 use crate::pack::{MAX_LARGE_BYTES, PackError};
 use crate::place::{manifest_reserve, place};
 use crate::plan::Limits;
+use crate::spool::Spool;
 use crate::task::{Failure, millis};
 
 /// The bytes read from a blob, and buffered for the file, at one time.
@@ -167,13 +170,13 @@ fn retried(error: &io::Error) -> bool {
 }
 
 /// Creates a file, new, for writing.
-type Create = dyn Fn(&Path) -> io::Result<Box<dyn Write>>;
+type Create = dyn Fn(&Path) -> io::Result<Box<dyn Write + Send>>;
 
 /// Renames a file: the digest rename and the commit.
 type Rename = dyn Fn(&Path, &Path) -> io::Result<()>;
 
 /// The real create: `O_CREAT | O_EXCL`, so a name that is already there is refused.
-fn create_new(path: &Path) -> io::Result<Box<dyn Write>> {
+fn create_new(path: &Path) -> io::Result<Box<dyn Write + Send>> {
     let file = OpenOptions::new().write(true).create_new(true).open(path)?;
     Ok(Box::new(file))
 }
@@ -217,7 +220,7 @@ impl OutDir {
     #[cfg(test)]
     pub(crate) fn with_create(
         self,
-        create: impl Fn(&Path) -> io::Result<Box<dyn Write>> + 'static,
+        create: impl Fn(&Path) -> io::Result<Box<dyn Write + Send>> + 'static,
     ) -> Self {
         Self {
             create: Box::new(create),
@@ -250,6 +253,31 @@ impl OutDir {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.dir
+    }
+
+    /// Starts the one object of a one-pass run (`--object-format one-pass`): creates `pack.part`,
+    /// new, and returns the run to write it through. Nothing is committed until
+    /// [`ObjectRun::finish`]; a run dropped before it removes the file.
+    ///
+    /// # Errors
+    /// [`OutDirError::Create`] (exit 13).
+    pub fn object(&self) -> Result<ObjectRun<'_>, Failure> {
+        let mut stage = Stage::new(self);
+        let name = pack_name(0);
+        let part = self.dir.join(part_name(&name));
+        let file = (self.create)(&part).map_err(|source| OutDirError::Create {
+            name: name.clone(),
+            source,
+        })?;
+        let read = part.clone();
+        stage.parts.push(part);
+        Ok(ObjectRun {
+            stage,
+            spool: Spool::new(
+                file,
+                Box::new(move |offset, len| read_at(&read, offset, len)),
+            ),
+        })
     }
 
     /// Places `blobs` into the slots `limits` allows, writes and commits every large object and
@@ -321,6 +349,55 @@ impl OutDir {
         let digest = stage.pack(&name, &pack_0, blobs, Some(&json))?;
         stage.commit(&name, &digest)
     }
+}
+
+/// The one object of a one-pass run while it is written.
+pub struct ObjectRun<'a> {
+    stage: Stage<'a>,
+    spool: Arc<Spool>,
+}
+
+impl ObjectRun<'_> {
+    /// Where the outputs are written as they are collected.
+    #[must_use]
+    pub fn spool(&self) -> &Arc<Spool> {
+        &self.spool
+    }
+
+    /// Ends the object with `manifest` (`manifest.timing.pack_ms` is, on entry, the time the
+    /// outputs took to collect, which is the whole of the walk, hash and write: they are one
+    /// pass), and commits it: the digest rename, then the commit rename.
+    ///
+    /// # Errors
+    /// A [`Failure`]: a manifest the shared rules refuse, or one that names a blob the object
+    /// does not hold (exit 12); the object's file refusing a write, or a commit that fails
+    /// (exit 13). The `.part` file is removed.
+    pub async fn finish(self, manifest: &mut TaskManifest) -> Result<(), Failure> {
+        let Self { mut stage, spool } = self;
+        let name = pack_name(0);
+        if let Some(digest) = spool.missing(manifest).await {
+            return Err(PackError::missing(&digest).into());
+        }
+        manifest.timing.walk_ms = Some(manifest.timing.pack_ms);
+        let files = spool.files(manifest).await.map_err(write_error(&name))?;
+        let json = manifest
+            .to_json_with(MAX_LARGE_BYTES)
+            .map_err(PackError::from)?;
+        let ended = tokio::task::spawn_blocking(move || spool.finish(&json, &files)).await;
+        let written = ended
+            .map_err(io::Error::other)
+            .and_then(|done| done)
+            .map_err(write_error(&name))?;
+        stage.commit(&name, &written.object)
+    }
+}
+
+/// `len` bytes at `offset` of the file at `path`.
+fn read_at(path: &Path, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt as _;
+    let mut bytes = vec![0; usize::try_from(len).map_err(io::Error::other)?];
+    std::fs::File::open(path)?.read_exact_at(&mut bytes, offset)?;
+    Ok(bytes)
 }
 
 /// `manifest` with every timing at the widest it can be written (`i64::MAX`), so its JSON is

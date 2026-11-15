@@ -499,6 +499,17 @@ of a record that does not hash to its digest drops that location). An input root
 `.kbf-out` at its top is refused, and a `whole_machine` action cannot run in this mode (the job
 service gives a whole-host job no mount).
 
+`--task-out-format` (`packs`, the default, or `one-pass`; put-dir only) says what the task writes
+(docs/design/one-pass-task-object.md). `one-pass` adds `--object-format one-pass` to the task's
+flags: the task then commits `pack` alone, one object whose manifest and index are at its end,
+read once from the outputs, with no cap on its length or on a blob (a blob over the record cap is
+a record of the object, found by its index row and read by range; a frontend whose reads of a
+large blob go to the storage nodes copies it there by a ranged read, as it did the `L<i>` object).
+The ingest reads both formats from the release that adds the flag, so roll in this order: ship
+the frontends and the base tree with the task to every host, and only then set `one-pass` and
+restart the frontends; roll the key back to `packs` before the binary. The tail of a one-pass object is read in one range bounded by `--task-max-object-manifest-bytes` (default 4 MiB) plus `--task-object-bytes-per-entry` (default 1024) for each of `--task-max-object-entries` (default 1,048,576) records. The frontend also checks the object's file index against its manifest and, given its action-tree writer, publishes each output directory as a tierstore manifest whose files point into the object, so a later input root holding the same directory reuses it. A task image that does
+not know the flag refuses it, which is why `packs` never sends it.
+
 **The `cas/b/` janitor** (off by default; the `[task-runs]` table of `kbf.toml`). The packs and
 large objects tasks write under `cas/b/` are not all kept: a refused run, a run that failed after
 its write, the unused keys of a key set, and a large object the ingest has already copied into the

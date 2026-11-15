@@ -195,8 +195,9 @@ root; owner decision of 2026-11-15, `docs/design/actions-as-jobs.md` 4.4, D7): i
 directly. The Command sees the job's root as it is, with `/run/js-files` empty (a put-dir job has no
 URL, no grant and no secret), the run's `/.kbf-run` (its streams and `private/`) and the put
 directory `/out`, which is writable (it is the job's own output path). The task ends the Command's
-process group when it exits or the timeout passes, and is the subreaper that kills and reaps every
-process it left, `setsid` included, before the outputs are read. The job log has no sandbox or
+process group when it exits or the timeout passes, and is the subreaper that reaps every process
+the Command leaves as it ends while the Command runs, and kills and reaps every process it left, `setsid`
+included, before the outputs are read. The job log has no sandbox or
 network line for it: nothing is made, so nothing is unusual.
 
 Today's job (the grant mode, without `--tree`) keeps its sandbox. The task tool starts the Command

@@ -157,6 +157,8 @@ pub mod digest;
 pub mod fetch;
 mod inputs;
 pub mod network;
+#[cfg(target_os = "linux")]
+mod orphans;
 pub mod out_dir;
 pub mod outputs;
 pub mod pack;

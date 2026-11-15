@@ -85,7 +85,7 @@ end of central directory           22 bytes, no comment, counts and offsets satu
   ZIP is a flat list of spans, which is what the pack index records.
 - **Our own format** (the earlier revision of this document) did the same job with a trailer of our own. ZIP is that, with the
   standard's names for the parts and every reader already written. The cost is a 68-byte header and 24-byte descriptor
-  per blob and a 130-byte central entry, against 52 bytes before; for 2,000 files that is about 0.4 MB on 170 MiB.
+  per blob and a 128-byte central entry, against 52 bytes before; the measured object below is 0.6 MB longer for 2,000 files on 170 MiB, the file index included.
 - **Not compressed.** Build outputs are mostly already-compressed or hashed-for-reuse objects, the frontend reads a blob by
   byte range at a known offset, and a decompressing reader would turn a ranged read into a scan.
 
@@ -219,10 +219,10 @@ for the shell and the 2,000 `head` runs), which are the same for both formats.
 | bytes read (rchar, 3 runs identical) | 545.5 MiB | 375.6 MiB |
 | of which the outputs | 2 x 170 MiB + small files | 1 x 170 MiB + small files |
 | objects written | `pack` + `L0` (the 170 MiB file is a large object) | `pack` |
-| task wall minus Command wall (ms, 3 runs) | 267, 281, 284 | 250, 238, 239 |
-| object bytes | 182,680,914 | 182,952,316 (the file index and the 2,001 entries' offsets) |
+| task wall minus Command wall (ms, 3 runs; the first packs run also warms the files) | 380, 257, 272 | 230, 227, 236 |
+| object bytes | 182,680,914 | 183,289,278 (ZIP headers, descriptors and central directory of 2,002 blobs, the file index) |
 
-The difference in bytes read is 169.9 MiB, one read of the large file. The wall time is 12% lower with a warm cache; a cold
+The difference in bytes read is 169.9 MiB, one read of the large file. The wall time is about 10 to 40% lower with a warm cache (median 272 ms against 230 ms); a cold
 cache pays the second read in disk time. The output phase is 0.24 s of a 3.9 s task here, so the gain is small for this
 Command and grows with output size. Found on the way: in the packs format a large file inside an output *directory* is
 refused (`large slot 0 holds ..., which no output names`); the one-pass object has no such case, since a large blob is a

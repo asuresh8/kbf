@@ -12,6 +12,7 @@
 //! so a static task binary can link it without the pack index, the object store client or their
 //! dependencies. `kbf-pack` re-exports every name below.
 
+pub mod one_pass;
 mod pack_layout;
 mod task_key;
 mod task_manifest;

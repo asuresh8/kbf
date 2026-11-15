@@ -64,6 +64,7 @@ pub use kbf_task_pack::{
     check_shape, mac_input, mac_input_put_dir, mac_input_v1, minute_of, read_manifest,
     read_manifest_with, write_pack, write_pack_with,
 };
+pub use kbf_task_pack::one_pass;
 pub use keys::{PackKeys, WriterKind};
 pub use packer::{
     Blob, FRONTEND_PACK_BYTES, Packed, Packer, PackerConfig, StoredPack, check_create_only,

@@ -195,8 +195,9 @@ root; owner decision of 2026-11-15, `docs/design/actions-as-jobs.md` 4.4, D7): i
 directly. The Command sees the job's root as it is, with `/run/js-files` empty (a put-dir job has no
 URL, no grant and no secret), the run's `/.kbf-run` (its streams and `private/`) and the put
 directory `/out`, which is writable (it is the job's own output path). The task ends the Command's
-process group when it exits or the timeout passes, and is the subreaper that kills and reaps every
-process it left, `setsid` included, before the outputs are read. The job log has no sandbox or
+process group when it exits or the timeout passes, and is the subreaper that reaps every process
+the Command leaves as it ends while the Command runs, and kills and reaps every process it left, `setsid`
+included, before the outputs are read. The job log has no sandbox or
 network line for it: nothing is made, so nothing is unusual.
 
 Today's job (the grant mode, without `--tree`) keeps its sandbox. The task tool starts the Command
@@ -262,7 +263,9 @@ adds to the action's timeout), `--executor-failed-stderr-log-bytes` (512, at mos
 none: the end of a failed job's standard error, with the job's secrets redacted, is one WARN line
 of the frontend's log, `the end of the standard error of a job that did not end well`; the whole
 output goes with the result as before), `--executor-max-run-secs` and `--executor-default-timeout-secs`
-(3000), `--executor-call-timeout-secs` (5), `--executor-poll-ms` (1000, from 100 to 10000: how often the executor polls the job service), `--executor-work-dir` (for the task tool),
+(3000), `--executor-call-timeout-secs` (5), `--executor-poll-ms` (1000, from 100 to 10000: how often the executor polls the job service), `--executor-prepare-limit-secs` (300: how long a run's input
+tree may take to publish; the `Start` window ends the submit, not the preparation), `--executor-prepare-concurrency` (4: how many of one
+worker's runs prepare at once; the rest wait their turn inside their window), `--executor-work-dir` (for the task tool),
 `--executor-allow-plain-http-put` (until the store serves TLS), and
 `--executor-allow-plain-http-grant` (a read listener without TLS, on a farm's own network; both
 plain-http flags are off by default), and `--executor-locate` (off by default: the task is given

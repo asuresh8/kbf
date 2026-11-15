@@ -40,7 +40,7 @@ rustls.workspace = true
 rustls-native-certs.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
-tokio = { workspace = true, features = ["rt", "fs", "process", "time", "io-util", "sync"] }
+tokio = { workspace = true, features = ["rt", "fs", "process", "time", "io-util", "signal", "sync"] }
 
 # The Command's namespaces and mounts (src/child.rs), through rustix's safe calls.
 [target.'cfg(target_os = "linux")'.dependencies]

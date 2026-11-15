@@ -38,6 +38,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use kbf_auth::Authorizers;
+use kbf_meta::ActionRecord;
 use kbf_objstore::ObjectStore;
 use kbf_pack::{PackError, PackKeys};
 use kbf_pack_index::action::ActionStore;
@@ -141,6 +142,32 @@ impl Stored {
         checked(result, &self.held()).await?;
         let encoded = result.encode_to_vec();
         let (actions, asked) = (Arc::clone(&self.actions), to_index(action));
+        let put = blocking(move || actions.put_action(&asked, &encoded, &[])).await?;
+        put.map_err(index_error)?;
+        Ok(())
+    }
+
+    /// Writes `result` as the action cache entry of `action`, for a caller that has checked it
+    /// (`Backend::prepare_action_result`) and holds `record`, the digest of its
+    /// encoding and its closure. The check is not made again.
+    ///
+    /// # Errors
+    /// [`StorageError::Invalid`] when `record` is not the record of `result`; the state store
+    /// could not answer.
+    pub async fn commit_prepared(
+        &self,
+        action: Digest,
+        record: ActionRecord,
+        result: &ActionResult,
+    ) -> Answer<()> {
+        let encoded = result.encode_to_vec();
+        if kbf_segments::sha256(&encoded) != record.result {
+            return Err(StorageError::Invalid(format!(
+                "the record names result {}, not the result handed with it",
+                record.result
+            )));
+        }
+        let (actions, asked) = (Arc::clone(&self.actions), to_index(&action));
         let put = blocking(move || actions.put_action(&asked, &encoded, &[])).await?;
         put.map_err(index_error)?;
         Ok(())

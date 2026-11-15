@@ -81,7 +81,7 @@ async fn prepared_for(
         deps: &deps,
         twin: &harness.twin,
     };
-    prepare(&ctx, LeaseId::new(7, 8), &action(), booking).await
+    prepare(&ctx.preparer(), LeaseId::new(7, 8), &action(), booking).await
 }
 
 const SHARE: Booking = Booking::Share {

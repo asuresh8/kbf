@@ -76,6 +76,8 @@ const MAX_RUN: &str = "executor_max_run_secs";
 const DEFAULT_TIMEOUT: &str = "executor_default_timeout_secs";
 const CALL_TIMEOUT: &str = "executor_call_timeout_secs";
 const POLL: &str = "executor_poll_ms";
+const PREPARE_LIMIT: &str = "executor_prepare_limit_secs";
+const PREPARE_CONCURRENCY: &str = "executor_prepare_concurrency";
 const NETWORK: &str = "executor_network";
 const OPEN_NETWORK: &str = "executor_allow_open_network";
 
@@ -429,6 +431,27 @@ pub(super) fn args() -> Vec<Arg> {
                  re-dispatch grace, which is checked at start. Used only with `--executor \
                  js-agent`",
             ),
+        number(
+            PREPARE_LIMIT,
+            "executor-prepare-limit-secs",
+            "How long the inputs of one run (its action, its input tree published into the \
+             store, its keys) may take to prepare, in seconds. The `Start`'s own window ends \
+             only the submit, not the preparation, which goes on until this limit so the tree \
+             it publishes is there for the run the farm starts next. Used only with \
+             `--executor js-agent`",
+            "300",
+        ),
+        Arg::new(PREPARE_CONCURRENCY)
+            .long("executor-prepare-concurrency")
+            .value_name("COUNT")
+            .value_parser(clap::value_parser!(u64).range(1..))
+            .default_value("4")
+            .help(
+                "How many runs of one virtual worker prepare their inputs at once. The farm \
+                 gives a worker a full set of `Start`s at one instant, and preparing them all \
+                 together slows each until none is ready inside its window; the ones past this \
+                 wait their turn. Used only with `--executor js-agent`",
+            ),
         Arg::new(NETWORK)
             .long("executor-network")
             .value_name("LEVEL")
@@ -638,6 +661,8 @@ fn js_agent_flags(m: &ArgMatches) -> Result<JsAgentFlags, String> {
     config.default_timeout = secs(DEFAULT_TIMEOUT);
     config.call_timeout = secs(CALL_TIMEOUT);
     config.poll = Duration::from_millis(count(POLL));
+    config.prepare_limit = secs(PREPARE_LIMIT);
+    config.prepare_concurrency = usize::try_from(count(PREPARE_CONCURRENCY)).unwrap_or(usize::MAX);
     config.network = network(m);
     config.allow_open_network = m.get_flag(OPEN_NETWORK);
     Ok(JsAgentFlags {

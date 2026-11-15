@@ -368,11 +368,17 @@ async fn run_job(
     }
     let cpu_before = children_usage().cpu_us;
     let clock = Instant::now();
+    let chld = watch_children(job).map_err(spawn_error)?;
     let mut child = process.spawn().map_err(spawn_error)?;
     let group = child.id();
     let mut ends_group = GroupKill(group);
     drop(process);
+    // While the Command runs, what its processes leave is reaped as it ends, not at the end.
+    let reaper = start_reaper(chld, group);
     let (status, timed_out) = wait_ending(&mut child, group, deadline).await;
+    if let Some(reaper) = reaper {
+        reaper.abort();
+    }
     ends_group.now();
     if job == Job::Subreaper {
         reap_descendants();
@@ -397,6 +403,38 @@ async fn run_job(
 fn become_subreaper() -> std::io::Result<()> {
     rustix::process::set_child_subreaper(Some(rustix::process::getpid()))?;
     Ok(())
+}
+
+/// The `SIGCHLD` listener of a [`Job::Subreaper`] run (Linux), made before the Command starts.
+#[cfg(target_os = "linux")]
+fn watch_children(job: Job) -> std::io::Result<Option<tokio::signal::unix::Signal>> {
+    (job == Job::Subreaper)
+        .then(crate::orphans::listen)
+        .transpose()
+}
+
+/// Starts reaping the children but `command` as they end (Linux), if `chld` is a listener.
+#[cfg(target_os = "linux")]
+fn start_reaper(
+    chld: Option<tokio::signal::unix::Signal>,
+    command: Option<u32>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    chld.map(|chld| crate::orphans::reap_others(chld, command))
+}
+
+/// No subreaper elsewhere: nothing to reap while the Command runs.
+#[cfg(not(target_os = "linux"))]
+fn watch_children(_: Job) -> std::io::Result<Option<tokio::signal::unix::Signal>> {
+    Ok(None)
+}
+
+/// No subreaper elsewhere: nothing to reap while the Command runs.
+#[cfg(not(target_os = "linux"))]
+fn start_reaper(
+    _: Option<tokio::signal::unix::Signal>,
+    _: Option<u32>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
 }
 
 /// Linux only: no subreaper elsewhere, so the group kill alone is kept.
@@ -434,7 +472,7 @@ fn reap_descendants() {}
 
 /// The pids of the processes whose parent is this one, from `/proc`.
 #[cfg(target_os = "linux")]
-fn own_children() -> Vec<rustix::process::Pid> {
+pub(crate) fn own_children() -> Vec<rustix::process::Pid> {
     let me = std::process::id();
     // Unreadable: no child is seen, and the wait that follows ends the loop or not as the
     // children say.

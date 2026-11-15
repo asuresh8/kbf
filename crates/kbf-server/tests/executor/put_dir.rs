@@ -83,3 +83,32 @@ async fn a_put_dir_run_is_submitted_as_the_tree_and_its_dir_and_read_back() {
         .collect();
     assert_eq!(read, vec![dir]);
 }
+
+/// Asserts that a frontend with no storage node, whose run committed into a put directory and
+/// was accepted, has the action's result in its action cache: a client that asks for the action
+/// afterwards is answered the result the callers got, with the exit code of the run. (The farm
+/// wrote the accepted result's record through a plane that refused every record it was handed.)
+#[tokio::test(start_paused = true)]
+async fn an_accepted_put_dir_run_is_cached_by_a_frontend_with_no_storage_node() {
+    let roots = PutDirRoots::new("/mnt/ts/put").expect("roots");
+    let stored = Rig::no_storage_node();
+    let cache = kbf_front::Backend::stored(std::sync::Arc::clone(&stored));
+    let mut rig = Rig::over(&[HOST], 1, 16, cache, |cfg| {
+        cfg.task_out = TaskOut::PutDir(roots)
+    })
+    .await;
+    rig.pump().await;
+    let caller = rig.submit(5);
+    rig.pump().await;
+    let job = rig.jobs_of(5).remove(0);
+
+    rig.host_finishes(job.id(), HOST, 0);
+    let Finished::Ran(ran) = rig.until_done(&caller, 4).await else {
+        panic!("the run did not finish ok");
+    };
+    rig.pump().await;
+
+    let cached = stored.action_result(&crate::rig::digest_of(5)).await;
+    let (_, held) = cached.expect("asked").expect("the result is cached");
+    assert_eq!(held, *ran);
+}

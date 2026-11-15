@@ -12,7 +12,12 @@
 //! Unless the action asked for it (`kbf-network=allow`, [`network`]), the program and everything it
 //! starts can make no socket but a Unix one.
 //!
-//! On Linux the program runs in mount and PID namespaces of its own ([`sandbox`]): the directories
+//! In a job ([`Run::job`], the tree job of `--tree`) none of what follows is made: the job is the
+//! sandbox (its own user namespace, no network, a layered root), so the program is started
+//! directly, with no filter, no namespace, no relay and no covers, and only its process cleanup is kept
+//! ([`Job`]). That is the owner's decision of 2026-11-15 (`docs/design/actions-as-jobs.md`, 4.4).
+//!
+//! Otherwise, on Linux the program runs in mount and PID namespaces of its own ([`sandbox`]): the directories
 //! of [`Run::hidden`] are covered, the run's own directories are bound at `/tmp`, `/var/tmp`, `/run`
 //! and `/root`, and every process it started is ended when it ends. One line per action says how
 //! that came out.
@@ -155,6 +160,22 @@ pub struct Run<'a> {
     /// namespace of its own (Linux): the tool passes its own path (`std::env::current_exe`). `None`
     /// makes no PID namespace, and the Command is started as it is.
     pub relay: Option<&'a Path>,
+    /// Run as a job's Command: started directly, with no network filter, namespace, covers or
+    /// relay (`unreadable`, `hidden` and `relay` are not used), and only the cleanup of [`Job`]
+    /// kept. `None` is the sandbox of this module.
+    pub job: Option<Job>,
+}
+
+/// How a job's Command is cleaned up after. In both the Command leads its own process group, which
+/// is killed with SIGKILL when the deadline passes and once the Command has exited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Job {
+    /// The group alone: a process that left it (`setsid`) is not ended.
+    Group,
+    /// Also, on Linux, this process becomes the subreaper of its descendants, and every process
+    /// left once the Command has ended is killed and reaped, whichever group it is in. For a
+    /// process that runs one Command at a time and owns its children: it reaps any child.
+    Subreaper,
 }
 
 /// Runs `command` under `run.root`.
@@ -192,6 +213,17 @@ pub async fn run(command: &Command, run: &Run<'_>) -> Result<Ran, RunError> {
     } else {
         PathBuf::from(program)
     };
+    if let Some(job) = run.job {
+        let process = process_of(
+            &program,
+            &command.arguments[1..],
+            &work_dir,
+            command,
+            private,
+            (stdout, stderr),
+        );
+        return run_job(job, process, &program, run.deadline).await;
+    }
     let launch = network::launch(
         &program,
         &command.arguments[1..],
@@ -200,23 +232,14 @@ pub async fn run(command: &Command, run: &Run<'_>) -> Result<Ran, RunError> {
     )?;
     let layout = sandbox::layout(run.hidden, run.private, run.root, &work_dir)?;
     let (started, relayed) = relayed(launch.clone(), run.relay);
-    let mut process = Process::new(&started.program);
-    process
-        .args(&started.args)
-        .current_dir(&work_dir)
-        .env_clear()
-        .envs(private)
-        .envs(
-            command
-                .environment_variables
-                .iter()
-                .map(|v| (&v.name, &v.value)),
-        )
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(stderr)
-        .process_group(0)
-        .kill_on_drop(true);
+    let mut process = process_of(
+        &started.program,
+        &started.args,
+        &work_dir,
+        command,
+        private,
+        (stdout, stderr),
+    );
     let confinement = network::confine(&mut process, run.network, layout, relayed)?;
 
     let cpu_before = children_usage().cpu_us;
@@ -252,25 +275,13 @@ pub async fn run(command: &Command, run: &Run<'_>) -> Result<Ran, RunError> {
     if let Some((stage, errno)) = refused {
         return Err(spawn_error(stage, std::io::Error::from_raw_os_error(errno)));
     }
-    let waited = tokio::time::timeout(run.deadline, child.wait()).await;
-    let (status, timed_out) = if let Ok(status) = waited {
-        (status, false)
-    } else {
-        kill_group(group);
-        (child.wait().await, true)
-    };
+    let (status, timed_out) = wait_ending(&mut child, group, run.deadline).await;
     // Whatever the program left running in its group is ended with it.
     ends_group.now();
     let status = status.map_err(|source| spawn_error(Stage::Command, source))?;
     let wall_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
     let usage = children_usage();
-    let exit_code = if timed_out {
-        TIMED_OUT_EXIT_CODE
-    } else {
-        status
-            .code()
-            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
-    };
+    let exit_code = exit_code_of(status, timed_out);
     Ok(Ran {
         exit_code,
         timed_out,
@@ -280,6 +291,171 @@ pub async fn run(command: &Command, run: &Run<'_>) -> Result<Ran, RunError> {
         layers,
         sandbox,
     })
+}
+
+/// The process that starts `program` with `args` in `work_dir`: the environment cleared, then the
+/// run's own variables and the Command's; no standard input; the streams `out` (standard output
+/// and error); leading a process group of its own; killed when dropped.
+fn process_of(
+    program: &Path,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    work_dir: &Path,
+    command: &Command,
+    private: Vec<(&'static str, OsString)>,
+    out: (Stdio, Stdio),
+) -> Process {
+    let mut process = Process::new(program);
+    process
+        .args(args)
+        .current_dir(work_dir)
+        .env_clear()
+        .envs(private)
+        .envs(
+            command
+                .environment_variables
+                .iter()
+                .map(|v| (&v.name, &v.value)),
+        )
+        .stdin(Stdio::null())
+        .stdout(out.0)
+        .stderr(out.1)
+        .process_group(0)
+        .kill_on_drop(true);
+    process
+}
+
+/// Waits for `child` until `deadline`, then kills its group (`group`, taken before the wait) and
+/// waits again; and whether the deadline passed.
+async fn wait_ending(
+    child: &mut tokio::process::Child,
+    group: Option<u32>,
+    deadline: Duration,
+) -> (std::io::Result<std::process::ExitStatus>, bool) {
+    if let Ok(status) = tokio::time::timeout(deadline, child.wait()).await {
+        (status, false)
+    } else {
+        kill_group(group);
+        (child.wait().await, true)
+    }
+}
+
+/// The exit code a run reports: [`TIMED_OUT_EXIT_CODE`] for a deadline, else the program's, or
+/// 128 plus the signal that ended it.
+fn exit_code_of(status: std::process::ExitStatus, timed_out: bool) -> i32 {
+    if timed_out {
+        TIMED_OUT_EXIT_CODE
+    } else {
+        status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+    }
+}
+
+/// Runs the Command of a job directly ([`Run::job`]): no filter, namespace, covers or relay.
+async fn run_job(
+    job: Job,
+    mut process: Process,
+    program: &Path,
+    deadline: Duration,
+) -> Result<Ran, RunError> {
+    let spawn_error = |source| RunError::Spawn {
+        stage: Stage::Command,
+        program: program.to_owned(),
+        source,
+    };
+    if job == Job::Subreaper {
+        become_subreaper().map_err(spawn_error)?;
+    }
+    let cpu_before = children_usage().cpu_us;
+    let clock = Instant::now();
+    let mut child = process.spawn().map_err(spawn_error)?;
+    let group = child.id();
+    let mut ends_group = GroupKill(group);
+    drop(process);
+    let (status, timed_out) = wait_ending(&mut child, group, deadline).await;
+    ends_group.now();
+    if job == Job::Subreaper {
+        reap_descendants();
+    }
+    let status = status.map_err(spawn_error)?;
+    let wall_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let usage = children_usage();
+    Ok(Ran {
+        exit_code: exit_code_of(status, timed_out),
+        timed_out,
+        wall_ms,
+        cpu_us: usage.cpu_us.saturating_sub(cpu_before),
+        peak_rss_bytes: usage.peak_rss_bytes,
+        layers: network::Layers::Job,
+        sandbox: Sandbox::Job,
+    })
+}
+
+/// Makes this process the subreaper of its descendants: a process whose parent ends is handed to
+/// this one, which can then end and reap it ([`reap_descendants`]).
+#[cfg(target_os = "linux")]
+fn become_subreaper() -> std::io::Result<()> {
+    rustix::process::set_child_subreaper(Some(rustix::process::getpid()))?;
+    Ok(())
+}
+
+/// Linux only: no subreaper elsewhere, so the group kill alone is kept.
+#[cfg(not(target_os = "linux"))]
+fn become_subreaper() -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Kills and reaps every child of this process (the Command's leftovers, handed to it as their
+/// parents ended), until it has none.
+#[cfg(target_os = "linux")]
+fn reap_descendants() {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, Signal, WaitOptions, kill_process, waitpid};
+    loop {
+        let children = own_children();
+        for pid in &children {
+            // A child that is gone already makes the kill fail, which is fine.
+            let _ = kill_process(*pid, Signal::KILL);
+        }
+        // With a child known, wait for one (it was just killed); with none seen, only look, so a
+        // child made after the look is seen next time and a missing one ends the loop.
+        let options = if children.is_empty() {
+            WaitOptions::NOHANG
+        } else {
+            WaitOptions::empty()
+        };
+        match waitpid(None, options) {
+            Err(Errno::INTR) | Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+/// No subreaper elsewhere.
+#[cfg(not(target_os = "linux"))]
+fn reap_descendants() {}
+
+/// The pids of the processes whose parent is this one, from `/proc`.
+#[cfg(target_os = "linux")]
+fn own_children() -> Vec<rustix::process::Pid> {
+    let me = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            // `pid (comm) state ppid ...`: comm may hold spaces and parentheses, so the fields
+            // are those after the last `)`.
+            let after = stat.rsplit_once(')')?.1;
+            let ppid: u32 = after.split_whitespace().nth(1)?.parse().ok()?;
+            (ppid == me)
+                .then(|| rustix::process::Pid::from_raw(pid))
+                .flatten()
+        })
+        .collect()
 }
 
 /// What to start for `launch` through `relay`: the relay's arguments for it (Linux, `relay`
@@ -509,6 +685,29 @@ mod tests {
                     unreadable: &[],
                     hidden: &[],
                     relay: None,
+                    job: None,
+                },
+            )
+            .await
+        }
+
+        /// [`Rig::run`] as a job's Command. The relay and the hidden directory are given, to show
+        /// that a job uses neither.
+        async fn run_job(&self, command: &Command, deadline: Duration) -> Result<Ran, RunError> {
+            let root = self.root();
+            run(
+                command,
+                &Run {
+                    root: &root,
+                    private: &self.private(),
+                    stdout: &self.stdout,
+                    stderr: &self.stderr,
+                    deadline,
+                    network: NETWORK,
+                    unreadable: &[],
+                    hidden: std::slice::from_ref(&root),
+                    relay: Some(Path::new("/no/such/kbf-task")),
+                    job: Some(Job::Group),
                 },
             )
             .await
@@ -823,6 +1022,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_job_runs_the_program_by_its_path_under_the_work_directory() {
+        let rig = Rig::new("job-path");
+        let bin = rig.root().join("work/bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::copy("/bin/pwd", bin.join("pwd")).expect("tool");
+        let mut command = program(&["./bin/pwd"]);
+        command.working_directory = "work".into();
+        let ran = rig.run_job(&command, LONG).await.expect("ran");
+        assert_eq!(ran.exit_code, 0);
+        assert_eq!(
+            rig.out(),
+            format!("{}\n", rig.root().join("work").display())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_makes_no_namespace_and_no_relay() {
+        let rig = Rig::new("job-namespaces");
+        let links = ["user", "net", "mnt", "pid"].map(|ns| format!("/proc/self/ns/{ns}"));
+        let mut argv = vec!["/bin/readlink"];
+        argv.extend(links.iter().map(String::as_str));
+        let ran = rig.run_job(&program(&argv), LONG).await.expect("ran");
+        let ours: String = links
+            .iter()
+            .map(|link| format!("{}\n", std::fs::read_link(link).expect("link").display()))
+            .collect();
+        assert_eq!(rig.out(), ours);
+        assert_eq!(ran.layers, Layers::Job);
+        assert_eq!(ran.sandbox, Sandbox::Job);
+    }
+
+    #[tokio::test]
+    async fn a_job_does_not_cover_the_input_root() {
+        let rig = Rig::new("job-no-cover");
+        std::fs::write(rig.root().join("marker"), "seen").expect("marker");
+        let mut command = program(&["/bin/cat", "marker"]);
+        command.working_directory = String::new();
+        rig.run_job(&command, LONG).await.expect("ran");
+        assert_eq!(rig.out(), "seen");
+    }
+
+    /// Whether process `pid` is no longer running: gone, or a zombie waiting to be reaped.
+    fn not_running(pid: &str) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|stat| {
+                stat.rsplit_once(')')
+                    .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+            })
+            .unwrap_or(true)
+    }
+
+    #[tokio::test]
+    async fn a_job_deadline_kills_the_process_group() {
+        let rig = Rig::new("job-deadline");
+        let command = program(&[
+            "/usr/bin/find",
+            ".",
+            "-maxdepth",
+            "0",
+            "-exec",
+            "/bin/sleep",
+            "600.4242",
+            ";",
+        ]);
+        let ran = rig.run_job(&command, Duration::ZERO).await.expect("ran");
+        assert!(ran.timed_out);
+        assert_eq!(ran.exit_code, TIMED_OUT_EXIT_CODE);
+        // SIGKILL is delivered asynchronously: wait until none is left running.
+        let running = || {
+            std::fs::read_dir("/proc")
+                .expect("proc")
+                .flatten()
+                .any(|e| {
+                    std::fs::read(e.path().join("cmdline"))
+                        .is_ok_and(|c| c.windows(8).any(|w| w == b"600.4242"))
+                        && !not_running(&e.file_name().to_string_lossy())
+                })
+        };
+        while running() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_job_program_that_cannot_start_is_a_command_start_error() {
+        let rig = Rig::new("job-missing");
+        let error = rig
+            .run_job(&program(&["/no/such/program"]), LONG)
+            .await
+            .expect_err("not started");
+        assert!(
+            matches!(&error, RunError::Spawn { stage: Stage::Command, program, .. } if program == Path::new("/no/such/program")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_reports_the_exit_code_and_the_signal() {
+        let rig = Rig::new("job-codes");
+        assert_eq!(
+            rig.run_job(&program(&["/usr/bin/false"]), LONG)
+                .await
+                .expect("ran")
+                .exit_code,
+            1
+        );
+        let rig = Rig::new("job-signal");
+        let ran = rig
+            .run_job(&program(&["/bin/kill", "-TERM", "0"]), LONG)
+            .await
+            .expect("ran");
+        assert_eq!(ran.exit_code, 128 + 15);
+    }
+
+    #[tokio::test]
     async fn usage_is_reported() {
         let rig = Rig::new("usage");
         let ran = rig
@@ -932,6 +1246,7 @@ mod tests {
                 unreadable: &[],
                 hidden: &[],
                 relay: None,
+                job: None,
             },
         )
         .await

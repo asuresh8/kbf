@@ -135,17 +135,14 @@ async fn a_put_directory_that_is_not_one_or_a_bad_lease_is_exit_14_and_nothing_r
     assert!(names(&out).is_empty());
 }
 
-/// Asserts that with `--stage-and-commit` a tree job hides the put directory from its Command,
-/// beside the grants and its run directory, and without it does not.
+/// Asserts that with `--stage-and-commit` a tree job hides nothing either, the put directory
+/// included: it is the job's own output path.
 #[test]
-fn a_tree_job_with_stage_and_commit_hides_the_put_directory() {
+fn a_tree_job_with_stage_and_commit_hides_nothing_either() {
     let (dir, digest) = copy_tree("out-dir-hidden");
     let out = put_dir(&dir);
     let inputs = read(&out_cli(&dir, &digest, &out), &dir).expect("read");
-    assert_eq!(
-        inputs.hidden,
-        [PathBuf::from(GRANTS_DIR), dir.join(RUN_DIR), out]
-    );
+    assert!(inputs.hidden.is_empty());
 }
 
 /// Asserts the flags: `--stage-and-commit` stands in for a pack URL, `--out-dir` defaults to

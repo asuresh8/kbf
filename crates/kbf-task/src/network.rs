@@ -186,6 +186,9 @@ pub fn allowed_notice(action: &Digest) -> String {
 pub enum Layers {
     /// The action asked for the network ([`PROPERTY`]): neither layer.
     Open,
+    /// A job's Command ([`crate::run::Run::job`]): none of these layers is made; the job is the
+    /// sandbox.
+    Job,
     /// This system has neither layer (neither Linux nor macOS); only the test feature gets here.
     Unavailable,
     /// macOS: the Command runs under a `sandbox-exec` profile that denies every network operation
@@ -213,6 +216,7 @@ impl std::fmt::Display for Layers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Layers::Open => write!(f, "open ({PROPERTY}={ALLOW})"),
+            Layers::Job => write!(f, "none (the job is the sandbox)"),
             Layers::Unavailable => write!(f, "none (this system has no filter)"),
             Layers::Seatbelt => write!(
                 f,

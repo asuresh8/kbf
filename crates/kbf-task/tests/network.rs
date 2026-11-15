@@ -63,6 +63,7 @@ async fn probe_run(name: &str, network: Network, args: &[&str]) -> (Ran, String)
             unreadable: &[],
             hidden: &[],
             relay: None,
+            job: None,
         },
     )
     .await

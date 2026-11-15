@@ -104,6 +104,9 @@ pub enum Sandbox {
     },
     /// The child did not report.
     Unreported,
+    /// A job's Command ([`Run::job`](crate::run::Run)): no namespace and no cover is made; the
+    /// job is the sandbox.
+    Job,
     /// There is no sandbox on this system (it is built for Linux only).
     Unavailable,
 }
@@ -114,6 +117,7 @@ impl std::fmt::Display for Sandbox {
             Sandbox::Made => write!(f, "mount and pid namespaces"),
             Sandbox::Incomplete { step, errno } => write!(f, "incomplete ({step} {errno})"),
             Sandbox::Unreported => write!(f, "unknown (no report from the child)"),
+            Sandbox::Job => write!(f, "none (the job is the sandbox)"),
             Sandbox::Unavailable => write!(f, "none (Linux only)"),
         }
     }

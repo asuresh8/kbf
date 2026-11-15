@@ -52,7 +52,7 @@ use crate::put::{
     put_reader, put_retrying, tls_config,
 };
 use crate::put_urls::PutUrls;
-use crate::run::{Run, RunError, output_paths, run};
+use crate::run::{Job, Run, RunError, output_paths, run};
 use crate::sandbox;
 
 /// Exit code: an input could not be read, checked or laid out.
@@ -262,6 +262,12 @@ pub struct Cli {
     /// has none, and its Command gets no PID namespace.
     #[arg(skip)]
     pub relay: Option<PathBuf>,
+    /// Not a flag: in a tree job (`--tree`), which runs its Command directly, make this process
+    /// the subreaper of what the Command leaves, and end and reap it all ([`crate::run::Job`]).
+    /// The binary's own start sets it ([`run_cli_with`]); a task run in another process (a test)
+    /// has none, and only the Command's process group is ended.
+    #[arg(skip)]
+    pub subreaper: bool,
 }
 
 impl Cli {
@@ -542,6 +548,12 @@ pub(crate) async fn collected(
             unreadable: &unreadable,
             hidden: &hidden,
             relay: cli.relay.as_deref(),
+            // A tree job runs in a job, which is its sandbox: the Command is started directly.
+            job: cli.tree.is_some().then_some(if cli.subreaper {
+                Job::Subreaper
+            } else {
+                Job::Group
+            }),
         },
     )
     .await?;
@@ -891,7 +903,11 @@ pub(crate) fn exit_code(outcome: Result<TaskManifest, Failure>) -> ExitCode {
 /// rather than run with the Command able to take its sockets.
 pub fn run_cli_with(protection: std::io::Result<()>, cli: &Cli) -> ExitCode {
     match protection {
-        Ok(()) => run_cli(&relayed(cli)),
+        Ok(()) => {
+            let mut cli = relayed(cli);
+            cli.subreaper = true;
+            run_cli(&cli)
+        }
         Err(e) => {
             eprintln!("kbf-task: cannot make this process non-dumpable: {e}");
             ExitCode::from(EXIT_SETUP)

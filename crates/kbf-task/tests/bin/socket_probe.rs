@@ -80,7 +80,8 @@ fn probe(args: &[&str]) -> u8 {
             );
             0
         }
-        ["linger", lock, pidfile] => linger(lock, pidfile),
+        ["linger", lock, pidfile] => linger(lock, pidfile, true),
+        ["linger-in-group", lock, pidfile] => linger(lock, pidfile, false),
         #[cfg(target_os = "linux")]
         ["hold", lock, pidfile] => hold(lock, pidfile),
         #[cfg(target_os = "linux")]
@@ -282,18 +283,19 @@ fn exec_from(dir: &str) -> u8 {
 }
 
 /// Starts `hold` in a process group of its own and returns once it holds the lock.
-fn linger(lock: &str, pidfile: &str) -> u8 {
+fn linger(lock: &str, pidfile: &str, own_group: bool) -> u8 {
     use std::io::BufRead as _;
     use std::os::unix::process::CommandExt as _;
     let Ok(me) = std::env::current_exe() else {
         return UNKNOWN_MODE;
     };
-    let Ok(mut held) = Command::new(me)
-        .args(["hold", lock, pidfile])
-        .stdout(std::process::Stdio::piped())
-        .process_group(0)
-        .spawn()
-    else {
+    let mut held = Command::new(me);
+    held.args(["hold", lock, pidfile])
+        .stdout(std::process::Stdio::piped());
+    if own_group {
+        held.process_group(0);
+    }
+    let Ok(mut held) = held.spawn() else {
         return UNKNOWN_MODE;
     };
     let mut line = String::new();

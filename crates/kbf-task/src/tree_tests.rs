@@ -563,6 +563,43 @@ async fn the_streams_and_home_are_in_the_run_directory_and_not_outputs() {
     assert!(manifest.output_files.is_empty());
 }
 
+/// Asserts that a tree job starts its Command directly in the job: it is in the namespaces of the
+/// task (no user, network, mount or PID namespace of its own).
+#[tokio::test]
+async fn a_tree_job_starts_its_command_in_the_tasks_own_namespaces() {
+    let dir = scratch("direct");
+    let links = ["user", "net", "mnt", "pid"].map(|ns| format!("/proc/self/ns/{ns}"));
+    let mut argv = vec!["readlink"];
+    argv.extend(links.iter().map(String::as_str));
+    let command = command(&argv, "", &[]);
+    let digest = lay_out(&dir, &action_of(&command), &command);
+    let (outcome, _sink) = run_tree(&tree_cli(&dir, &digest)).await;
+    assert_eq!(outcome.expect("task").exit_code, 0);
+    let ours: String = links
+        .iter()
+        .map(|link| format!("{}\n", std::fs::read_link(link).expect("link").display()))
+        .collect();
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".kbf-run/stdout")).expect("stdout"),
+        ours
+    );
+}
+
+/// Asserts that a tree job's Command sees the tree's root (`work/..`) as it is: `.kbf`, the
+/// task's `.kbf-run` and `work`, with nothing covered.
+#[tokio::test]
+async fn a_tree_jobs_command_sees_the_tree_root_with_nothing_covered() {
+    let dir = scratch("uncovered");
+    let command = command(&["ls", "-A", ".."], "", &[]);
+    let digest = lay_out(&dir, &action_of(&command), &command);
+    let (outcome, _sink) = run_tree(&tree_cli(&dir, &digest)).await;
+    assert_eq!(outcome.expect("task").exit_code, 0);
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".kbf-run/stdout")).expect("stdout"),
+        ".kbf\n.kbf-run\nwork\n"
+    );
+}
+
 /// Asserts that a sink with more pack slots than a manifest can name is a setup failure before
 /// the tree is read.
 #[tokio::test]
@@ -732,17 +769,14 @@ async fn a_tree_job_whose_setup_fails_exits_14_before_the_tree_is_read() {
     );
 }
 
-/// Asserts what a tree job hands the sandbox to hide from its Command: the job's grants and the
-/// task's run directory `.kbf-run` (its streams; `private/` is bound again), and not `work`, the
-/// input root the Command runs in; nothing of today's `--work-dir`.
+/// Asserts that a tree job hands nothing to hide: the job is the sandbox (owner decision of
+/// 2026-11-15), so the Command runs in `work` with the grants, the run directory and, with
+/// `--stage-and-commit`, the put directory all as the job has them.
 #[test]
-fn a_tree_job_hides_the_grants_and_its_run_directory() {
+fn a_tree_job_hides_nothing_from_its_command() {
     let (dir, digest) = copy_tree("hidden");
     let inputs = read(&tree_cli(&dir, &digest), &dir).expect("read");
-    assert_eq!(
-        inputs.hidden,
-        [PathBuf::from(GRANTS_DIR), dir.join(RUN_DIR)]
-    );
+    assert!(inputs.hidden.is_empty());
     assert_eq!(inputs.root, dir.join("work"));
     assert_eq!(inputs.run_dir, dir.join(RUN_DIR));
 }

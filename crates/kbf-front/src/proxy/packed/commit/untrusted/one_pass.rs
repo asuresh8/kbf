@@ -28,15 +28,15 @@
 
 use kbf_pack::TaskManifest;
 use kbf_pack::one_pass::{Entry, Tail, Trailer};
+use kbf_types::Digest;
+use std::collections::BTreeMap;
+
 use kbf_pack_index::{BlobDigest, NewPack, PackBlob};
 
+use super::IssuedPackKey;
 use super::large::Large;
-use super::task::{Ingest, Ran, RejectReason, Step, rebuilt};
-use super::{IssuedPackKey, MAX_UNTRUSTED_MANIFEST_BYTES};
-
-/// The most bytes of the tail one record may account for (its central directory entry of about
-/// 130 bytes and its line of the file index, which names a path).
-const BYTES_PER_ENTRY: u64 = 1024;
+use super::task::{Ingest, Ran, RejectReason, Step, Stop, rebuilt};
+use crate::output_index::{DerivedTree, OutputIndex};
 
 /// The length of the end of a one-pass object, which is how many bytes of the end of pack 0
 /// [`Ingest::run`] reads to tell the formats apart.
@@ -52,7 +52,7 @@ impl Ingest<'_> {
     pub(super) async fn one_pass(&self, first: &IssuedPackKey, size: u64, end: &[u8]) -> Step<Ran> {
         let malformed = |_| RejectReason::Malformed;
         let trailer = Trailer::parse(end, size).map_err(malformed)?;
-        if trailer.manifest_len > MAX_UNTRUSTED_MANIFEST_BYTES {
+        if trailer.manifest_len > self.limits.max_object_manifest_bytes {
             return Err(RejectReason::TooLarge.into());
         }
         let max_entries = u64::try_from(self.limits.max_object_entries).unwrap_or(u64::MAX);
@@ -62,8 +62,9 @@ impl Ingest<'_> {
         // What one range may hold: the manifest, and for each record at most this many bytes of
         // its central directory entry and its line of the file index.
         let len = trailer.tail_len();
-        let most = MAX_UNTRUSTED_MANIFEST_BYTES
-            .saturating_add(max_entries.saturating_mul(BYTES_PER_ENTRY));
+        let per_entry = self.limits.object_bytes_per_entry;
+        let most = (self.limits.max_object_manifest_bytes)
+            .saturating_add(max_entries.saturating_mul(per_entry));
         if len > most {
             return Err(RejectReason::TooLarge.into());
         }
@@ -93,6 +94,10 @@ impl Ingest<'_> {
         if (manifest.output_digests()).any(|digest| !held(&digest)) {
             return Err(RejectReason::Incomplete.into());
         }
+        let (index, trees) = agreed(&manifest, &tail.files)?;
+        if index.digests().iter().any(|digest| !held(digest)) {
+            return Err(RejectReason::Incomplete.into());
+        }
 
         self.packs
             .record_put_dir_pack(first, new_pack(first, &tail.entries, size))
@@ -105,6 +110,19 @@ impl Ingest<'_> {
                 .await?;
             copied += entry.digest.size_bytes;
         }
+        if let Some(writer) = self.publish {
+            let spans: BTreeMap<Digest, u64> =
+                tail.entries.iter().map(|e| (e.digest, e.offset)).collect();
+            for tree in &trees {
+                let key = first.key();
+                let published = writer
+                    .publish_output(&tree.root, &tree.directories, key, &spans)
+                    .await;
+                if let Err(error) = published {
+                    tracing::warn!(%error, path = %tree.path, "an output directory's manifest was not published");
+                }
+            }
+        }
         let result = rebuilt(&manifest, self.packs.now());
         let cached = self.cached(&result, manifest.exit_code).await?;
         Ok(Ran {
@@ -114,6 +132,41 @@ impl Ingest<'_> {
             large_bytes: copied,
         })
     }
+}
+
+/// Checks the file index against the manifest, and derives the output directories' trees from it:
+/// every output file and symlink of the manifest is in the index as the manifest says, and the
+/// `Tree` derived for each output directory has the digest the manifest names. An object with no
+/// output has no index to check.
+fn agreed(manifest: &TaskManifest, bytes: &[u8]) -> Step<(OutputIndex, Vec<DerivedTree>)> {
+    let bad = || Stop::from(RejectReason::BadManifest);
+    let outputs = [
+        manifest.output_files.is_empty(),
+        manifest.output_directories.is_empty(),
+        manifest.output_symlinks.is_empty(),
+    ];
+    if outputs.iter().all(|none| *none) {
+        return Ok((OutputIndex::default(), Vec::new()));
+    }
+    let index = OutputIndex::parse(bytes).map_err(|_| bad())?;
+    let files = manifest.output_files.iter().all(|file| {
+        index.file(&file.path).map(|f| (f.digest, f.exec))
+            == Some((file.digest, file.is_executable))
+    });
+    let links = (manifest.output_symlinks.iter())
+        .all(|link| index.link(&link.path) == Some(link.target.as_str()));
+    let mut trees = Vec::with_capacity(manifest.output_directories.len());
+    for dir in &manifest.output_directories {
+        let tree = index.tree(&dir.path).map_err(|_| bad())?;
+        if tree.digest != dir.tree {
+            return Err(bad());
+        }
+        trees.push(tree);
+    }
+    if !files || !links {
+        return Err(bad());
+    }
+    Ok((index, trees))
 }
 
 /// The pack index's record of the object: a row for each entry of its index.

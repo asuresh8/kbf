@@ -246,6 +246,8 @@ fn flags(dir: &Path) -> TaskFlags {
         url_slack: Duration::from_secs(DEFAULT_URL_SLACK_SECS),
         max_digests: ClosureLimits::DEFAULT.max_digests,
         max_object_entries: 1 << 20,
+        max_object_manifest_bytes: 4 << 20,
+        object_bytes_per_entry: 1024,
         max_bytes: ClosureLimits::DEFAULT.max_bytes,
         max_packs: 8,
         max_large: 8,
@@ -729,6 +731,8 @@ fn put_dir_flags(dir: &Path) -> PutDirFlags {
         url_slack: Duration::from_secs(DEFAULT_URL_SLACK_SECS),
         max_digests: ClosureLimits::DEFAULT.max_digests,
         max_object_entries: 1 << 20,
+        max_object_manifest_bytes: 4 << 20,
+        object_bytes_per_entry: 1024,
         max_bytes: ClosureLimits::DEFAULT.max_bytes,
     }
 }

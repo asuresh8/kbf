@@ -579,10 +579,71 @@ use kbf_pack::one_pass::ObjectWriter;
 
 /// A one-pass object of `manifest` and `records`, each written whole.
 fn one_pass_of(manifest: &TaskManifest, records: &[&[u8]]) -> Vec<u8> {
-    one_pass_json(
-        &manifest.to_json_with(512 << 20).expect("a manifest"),
-        records,
+    let json = manifest.to_json_with(512 << 20).expect("a manifest");
+    one_pass_indexed(&json, records, &index_for(manifest, records))
+}
+
+/// The neutral file index of `manifest`'s outputs: its files and symlinks, and for each output
+/// directory the files of its `Tree` (which `records` holds; the tests' trees are one directory).
+fn index_for(manifest: &TaskManifest, records: &[&[u8]]) -> Vec<u8> {
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    let file = |path: &str, digest: &Digest, exec: bool| {
+        let offset = if digest.size_bytes == 0 {
+            String::new()
+        } else {
+            ",\"offset\":0".to_owned()
+        };
+        format!(
+            r#"{{"path":"{path}","size":{},"exec":{exec},"sha256":"{}"{offset}}}"#,
+            digest.size_bytes,
+            digest.hash_hex()
+        )
+    };
+    for out in &manifest.output_files {
+        files.push((
+            out.path.clone(),
+            file(&out.path, &out.digest, out.is_executable),
+        ));
+    }
+    for dir in &manifest.output_directories {
+        dirs.push(format!("\"{}\"", dir.path));
+        let record = records
+            .iter()
+            .find(|r| sha256(r) == dir.tree)
+            .expect("the tree is a record");
+        let tree = reapi::Tree::decode(*record).expect("a tree");
+        for node in tree.root.expect("root").files {
+            let digest = kbf_types::Digest::parse(
+                kbf_types::DigestFunction::Sha256,
+                &format!(
+                    "{}/{}",
+                    node.digest.as_ref().expect("digest").hash,
+                    node.digest.as_ref().expect("digest").size_bytes
+                ),
+            )
+            .expect("a digest");
+            let path = format!("{}/{}", dir.path, node.name);
+            files.push((path.clone(), file(&path, &digest, node.is_executable)));
+        }
+    }
+    files.sort();
+    let files: Vec<String> = files.into_iter().map(|(_, json)| json).collect();
+    format!(
+        r#"{{"v":1,"files":[{}],"symlinks":[],"dirs":[{}]}}"#,
+        files.join(","),
+        dirs.join(",")
     )
+    .into_bytes()
+}
+
+/// A one-pass object of the manifest `json`, `records` and the file index `index`.
+fn one_pass_indexed(json: &[u8], records: &[&[u8]], index: &[u8]) -> Vec<u8> {
+    let mut writer = ObjectWriter::new(Vec::new());
+    for record in records {
+        writer.blob(&sha256(record), record).expect("written");
+    }
+    writer.finish(json, index).expect("finished").0
 }
 
 /// A one-pass object whose manifest record is `json`, as it is.
@@ -785,7 +846,10 @@ async fn dead_bytes_between_records_are_accepted() {
         writer.end(again, &sha256(record)).expect("ended");
     }
     let object = writer
-        .finish(&manifest.to_json().expect("json"), b"")
+        .finish(
+            &manifest.to_json().expect("json"),
+            &index_for(&manifest, &farm.records()),
+        )
         .expect("done")
         .0;
     farm.put(Slot::Pack(0), &object).await;
@@ -937,7 +1001,9 @@ async fn a_file_index_longer_than_the_entry_limit_allows_is_too_large_unread() {
         writer.blob(&sha256(record), record).expect("written");
     }
     let json = manifest.to_json().expect("json");
-    let object = writer.finish(&json, &vec![b' '; 5 << 20]).expect("done").0;
+    let mut index = index_for(&manifest, &farm.records());
+    index.extend(vec![b' '; 5 << 20]);
+    let object = writer.finish(&json, &index).expect("done").0;
     farm.put(Slot::Pack(0), &object).await;
     let seven = UntrustedLimits {
         max_object_entries: 7,
@@ -946,5 +1012,241 @@ async fn a_file_index_longer_than_the_entry_limit_allows_is_too_large_unread() {
     let got = farm.run_with(&seven).await;
     farm.refused(got, RejectReason::TooLarge);
     // The index is not JSON the frontend reads: with room for it the object is ingested.
+    assert!(matches!(farm.run().await, Ingested::Ran { .. }));
+}
+
+// ---- the file index against the manifest, and the manifests it publishes ----
+
+/// Asserts that an object whose file index disagrees with its manifest is a `BadManifest`: a
+/// Tree derived from the index that is not the Tree the manifest names, a top-level file whose
+/// digest or mode differs, a symlink the index does not have, an index that is not an index, and
+/// an index with no output directory the manifest names.
+#[tokio::test]
+async fn a_file_index_that_disagrees_with_the_manifest_is_a_bad_manifest() {
+    let farm = PutDir::new().await;
+    let manifest = farm.one_object_manifest();
+    let records = farm.records();
+    let honest = String::from_utf8(index_for(&manifest, &records)).expect("utf-8");
+    let beta = farm.p.beta.len();
+    let tree_file = format!("out/d/{}", sha256(&farm.p.in_dir).hash_hex());
+    let mut with_link = manifest.clone();
+    with_link.output_symlinks.push(kbf_pack::OutputSymlink {
+        path: "out/link".to_owned(),
+        target: "alpha".to_owned(),
+    });
+    let cases: Vec<(&str, TaskManifest, String)> = vec![
+        (
+            "another mode",
+            manifest.clone(),
+            honest.replacen("\"exec\":false", "\"exec\":true", 1),
+        ),
+        (
+            "another digest",
+            manifest.clone(),
+            honest.replace(
+                &sha256(&farm.p.beta).hash_hex(),
+                &sha256(&farm.p.alpha).hash_hex(),
+            ),
+        ),
+        (
+            "a file short",
+            manifest.clone(),
+            honest.replacen(
+                &format!("{{\"path\":\"{tree_file}\""),
+                "{\"path\":\"out/d/other\"",
+                1,
+            ),
+        ),
+        ("a symlink the index lacks", with_link, honest.clone()),
+        ("not JSON", manifest.clone(), "{not json".to_owned()),
+        (
+            "no directory",
+            manifest.clone(),
+            honest.replace("\"dirs\":[\"out/d\"]", "\"dirs\":[]"),
+        ),
+    ];
+    let _ = beta;
+    for (what, manifest, index) in cases {
+        let farm = PutDir::new().await;
+        let json = manifest.to_json_with(512 << 20).expect("json");
+        let object = one_pass_indexed(&json, &farm.records(), index.as_bytes());
+        farm.put(Slot::Pack(0), &object).await;
+        let got = farm.run().await;
+        assert_eq!(got, Ingested::Reject(RejectReason::BadManifest), "{what}");
+        assert!(farm.rig.index.has_none(&farm.p.digests()), "{what}");
+    }
+}
+
+/// Asserts that a file the index names that no record holds is `Incomplete`, though the manifest
+/// names nothing of it (a file inside an output directory whose Tree, built from the index, would
+/// name a blob nobody can read): here the tree's file, absent from the object's records.
+#[tokio::test]
+async fn an_indexed_file_no_record_holds_is_incomplete() {
+    let farm = PutDir::new().await;
+    let manifest = farm.one_object_manifest();
+    let p = &farm.p;
+    // The Tree record is there, the file it names is not.
+    let records: [&[u8]; 4] = [&p.alpha, &p.beta, &p.stdout, &p.tree.1];
+    let object = one_pass_indexed(
+        &manifest.to_json_with(512 << 20).expect("json"),
+        &records,
+        &index_for(&manifest, &farm.records()),
+    );
+    farm.put(Slot::Pack(0), &object).await;
+    let got = farm.run().await;
+    farm.refused(got, RejectReason::Incomplete);
+}
+
+/// Asserts that, given the frontend's tree writer, a one-pass object's output directory is
+/// published as a tierstore manifest: stored under `cas/l/<sha256>`, read by tierstore's own
+/// reader, naming each file with `source` the span of this object (its key, and the offset the
+/// pack index records), so that a later input root holding the same directory finds it in the
+/// writer's memo; and that a store that refuses the write costs the reuse, never the run.
+#[tokio::test]
+async fn an_output_directory_is_published_as_a_tierstore_manifest_pointing_into_the_object() {
+    use kbf_front::action_tree::TreeWriter;
+    use kbf_front::ingest_put_dir_with;
+    use kbf_objstore::{ByteRange, ObjectKey, ObjectStore as _};
+
+    let farm = PutDir::new().await;
+    let manifest = farm.one_object_manifest();
+    farm.put(Slot::Pack(0), &one_pass_of(&manifest, &farm.records()))
+        .await;
+    let clock: kbf_front::Clock = std::sync::Arc::new(std::time::SystemTime::now);
+    let writer = TreeWriter::new(
+        std::sync::Arc::new(farm.backend.clone()),
+        std::sync::Arc::new(farm.rig.packs.clone()),
+        clock,
+    );
+    let (packs, backend, mint) = (&farm.rig.packs, &farm.backend, &farm.mint);
+    let limits = UntrustedLimits::default();
+    let got = ingest_put_dir_with(
+        packs,
+        backend,
+        mint,
+        LEASE,
+        &farm.dir,
+        &farm.action,
+        &limits,
+        Some(&writer),
+    )
+    .await;
+    assert!(matches!(got, Ingested::Ran { .. }), "{got:?}");
+
+    let keys: Vec<String> = farm
+        .rig
+        .store
+        .keys()
+        .await
+        .into_iter()
+        .filter(|k| k.starts_with("cas/l/"))
+        .collect();
+    assert_eq!(keys.len(), 1, "one directory, one manifest: {keys:?}");
+    let key = ObjectKey::new(keys[0].clone()).expect("a key");
+    let len = farm.rig.store.len(&key).await.expect("len").expect("there");
+    let bytes = farm
+        .rig
+        .store
+        .get_range(&key, ByteRange::new(0, len).expect("range"))
+        .await
+        .expect("read");
+    let digest = tierstore::TreeDigest::of(&bytes);
+    assert_eq!(keys[0], format!("cas/l/{digest}"));
+    let children = tierstore::parse_manifest(&bytes, &digest).expect("tierstore's reader takes it");
+    assert_eq!(children.children.len(), 1);
+    let at = farm.rig.index.where_is(&[sha256(&farm.p.in_dir)]);
+    let at = at[0].as_ref().expect("the file's row");
+    let text = String::from_utf8(bytes.to_vec()).expect("utf-8");
+    assert!(
+        text.contains(&format!(
+            "\"source\":{{\"key\":\"{}\",\"offset\":{}}}",
+            farm.key(Slot::Pack(0)),
+            at.offset
+        )),
+        "{text}"
+    );
+}
+
+/// A store that refuses every write and holds nothing.
+struct Refusing;
+
+impl kbf_front::large_backfill::LargeStore for Refusing {
+    fn len<'a>(
+        &'a self,
+        _: &'a kbf_objstore::ObjectKey,
+    ) -> futures::future::BoxFuture<'a, Result<Option<u64>, kbf_objstore::ObjectStoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn put<'a>(
+        &'a self,
+        _: &'a kbf_objstore::ObjectKey,
+        _: u64,
+        _: kbf_objstore::BodyStream,
+    ) -> futures::future::BoxFuture<'a, Result<(), kbf_objstore::ObjectStoreError>> {
+        Box::pin(async { Err(kbf_objstore::ObjectStoreError::Body("refused".to_owned())) })
+    }
+}
+
+#[tokio::test]
+async fn a_manifest_that_cannot_be_published_costs_the_reuse_and_not_the_run() {
+    use kbf_front::action_tree::TreeWriter;
+    let farm = PutDir::new().await;
+    let manifest = farm.one_object_manifest();
+    farm.put(Slot::Pack(0), &one_pass_of(&manifest, &farm.records()))
+        .await;
+    let clock: kbf_front::Clock = std::sync::Arc::new(std::time::SystemTime::now);
+    let writer = TreeWriter::new(
+        std::sync::Arc::new(farm.backend.clone()),
+        std::sync::Arc::new(Refusing),
+        clock,
+    );
+    let (packs, backend, mint) = (&farm.rig.packs, &farm.backend, &farm.mint);
+    let limits = UntrustedLimits::default();
+    let got = kbf_front::ingest_put_dir_with(
+        packs,
+        backend,
+        mint,
+        LEASE,
+        &farm.dir,
+        &farm.action,
+        &limits,
+        Some(&writer),
+    )
+    .await;
+    assert!(matches!(got, Ingested::Ran { cached: true, .. }), "{got:?}");
+    assert!(farm.rig.index.has_all(&farm.p.digests()));
+}
+
+/// Asserts that the two bounds of a one-pass object's tail are the limits the ingest is given: a
+/// manifest cap below the manifest's length, and a per-record allowance too small for the tail,
+/// each refuse the object as too large unread, and the defaults take it.
+#[tokio::test]
+async fn the_tail_bounds_are_the_limits_the_ingest_is_given() {
+    let manifest = PutDir::new().await.one_object_manifest();
+    let json_len = manifest.to_json().expect("json").len() as u64;
+    let small_manifest = UntrustedLimits {
+        max_object_manifest_bytes: json_len - 1,
+        ..UntrustedLimits::default()
+    };
+    // The tail is the manifest, the file index and the central directory: the base is the
+    // manifest cap, so a cap of the manifest alone and one byte for each of seven records is
+    // too little.
+    let tight = UntrustedLimits {
+        max_object_manifest_bytes: json_len,
+        max_object_entries: 7,
+        object_bytes_per_entry: 1,
+        ..UntrustedLimits::default()
+    };
+    for limits in [small_manifest, tight] {
+        let farm = PutDir::new().await;
+        farm.put(Slot::Pack(0), &one_pass_of(&manifest, &farm.records()))
+            .await;
+        let got = farm.run_with(&limits).await;
+        farm.refused(got, RejectReason::TooLarge);
+    }
+    let farm = PutDir::new().await;
+    farm.put(Slot::Pack(0), &one_pass_of(&manifest, &farm.records()))
+        .await;
     assert!(matches!(farm.run().await, Ingested::Ran { .. }));
 }

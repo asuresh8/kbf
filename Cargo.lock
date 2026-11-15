@@ -1877,6 +1877,7 @@ dependencies = [
  "kbf-map",
  "kbf-meta",
  "kbf-objstore",
+ "kbf-outputs",
  "kbf-pack",
  "kbf-pack-index",
  "kbf-proto",

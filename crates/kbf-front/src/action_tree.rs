@@ -325,6 +325,75 @@ impl TreeWriter {
         Ok(ActionTree { digest: root.tree })
     }
 
+    /// Publishes the tierstore manifests of an output directory a task wrote, from the facts of
+    /// its one-pass object: `directories` are the tree's `Directory` messages as the frontend
+    /// derived them (`root` the output directory's), and `spans` says where each record's bytes start in the
+    /// object `key` (every non-empty file of the directories is one). Each manifest is built as [`TreeWriter::write`] builds it,
+    /// with `source` the span of that object, stored with a create-only write and remembered, so
+    /// that a later input root holding an equal subtree finds it in the memo and writes only what
+    /// is new. Returns the manifest of `root`.
+    ///
+    /// # Errors
+    /// [`NoTree`]: what tierstore refuses or cannot represent, or a store that failed.
+    pub(crate) async fn publish_output(
+        &self,
+        root: &Digest,
+        directories: &BTreeMap<Digest, KeptDirectory>,
+        key: &str,
+        spans: &BTreeMap<Digest, u64>,
+    ) -> Result<Digest, NoTree> {
+        let now = (self.clock)();
+        let plan = self.plan_of(root, &|digest| directories.get(digest), now)?;
+        let measures = measure(&plan, now);
+        let top = measures[root];
+        if top.entries > MAX_ENTRIES {
+            return Err(NoTree::TooManyEntries {
+                entries: top.entries,
+            });
+        }
+        if top.height > MAX_DEPTH {
+            return Err(NoTree::TooDeep { depth: top.height });
+        }
+        // Every file of the directories is a record of the object: the ingest checks the index's
+        // digests against the object's before it publishes.
+        let places: BTreeMap<Digest, Place> = (spans.iter())
+            .map(|(digest, offset)| {
+                let place = Place::Packed {
+                    key: key.to_owned(),
+                    offset: *offset,
+                };
+                (*digest, place)
+            })
+            .collect();
+        let mut manifests: BTreeMap<Digest, Digest> = plan
+            .hits
+            .iter()
+            .map(|(d, hit)| (*d, hit.manifest))
+            .collect();
+        let mut built = Vec::with_capacity(plan.order.len());
+        for (digest, directory) in &plan.order {
+            let manifest = directory_manifest(directory, &places, &manifests).map_err(|error| {
+                NoTree::Refused {
+                    directory: *digest,
+                    error,
+                }
+            })?;
+            manifests.insert(*digest, manifest.digest);
+            built.push(manifest);
+        }
+        let store = &*self.store;
+        let writes: Vec<_> = built
+            .iter()
+            .map(|manifest| place::write_manifest(store, &manifest.digest, manifest.bytes.clone()))
+            .collect();
+        stream::iter(writes)
+            .buffered(place::WRITES_IN_FLIGHT)
+            .try_collect::<()>()
+            .await?;
+        self.remember(&plan, &measures, &manifests);
+        Ok(manifests[root])
+    }
+
     /// Drops the memo's entries of the input root `root`: its own, and every entry the memo
     /// reaches from it through its subdirectories (expired ones included), so that its next tree
     /// is built from the pack index as it is then. An entry the memo already dropped at its
@@ -340,11 +409,21 @@ impl TreeWriter {
     /// The directories of `kept`'s tree to build, children first, each once, and the memo's
     /// hits, whose subtrees are not walked.
     fn plan<'a>(&self, kept: &'a KeptClosure, now: SystemTime) -> Result<Plan<'a>, NoTree> {
+        self.plan_of(kept.root(), &|digest| kept.directory(digest), now)
+    }
+
+    /// [`TreeWriter::plan`] for the directory `root` of any set of directories `lookup` finds.
+    fn plan_of<'a>(
+        &self,
+        root: &Digest,
+        lookup: &dyn Fn(&Digest) -> Option<&'a KeptDirectory>,
+        now: SystemTime,
+    ) -> Result<Plan<'a>, NoTree> {
         let mut memo = self.lock();
         let mut order = Vec::new();
         let mut hits = BTreeMap::new();
         let mut seen = BTreeSet::new();
-        let mut stack: Vec<(Digest, Option<&KeptDirectory>)> = vec![(*kept.root(), None)];
+        let mut stack: Vec<(Digest, Option<&KeptDirectory>)> = vec![(*root, None)];
         while let Some((digest, expanded)) = stack.pop() {
             if let Some(directory) = expanded {
                 // Every subdirectory of it was popped, and built or found, before this.
@@ -358,9 +437,7 @@ impl TreeWriter {
                 hits.insert(digest, hit);
                 continue;
             }
-            let directory = kept
-                .directory(&digest)
-                .ok_or(NoTree::NotKept { directory: digest })?;
+            let directory = lookup(&digest).ok_or(NoTree::NotKept { directory: digest })?;
             if let Some(node) = &directory.properties {
                 return Err(NoTree::NodeProperties {
                     directory: digest,

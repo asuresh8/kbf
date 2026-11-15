@@ -648,6 +648,8 @@ fn limits() -> UntrustedLimits {
         max_pack_bytes: 1 << 20,
         max_blob_bytes: 1 << 20,
         max_object_entries: 1 << 20,
+        max_object_manifest_bytes: 4 << 20,
+        object_bytes_per_entry: 1024,
     }
 }
 
@@ -826,6 +828,8 @@ async fn a_pack_over_the_executors_caps_is_too_large() {
         max_pack_bytes: small.len() as u64 - 1,
         max_blob_bytes: 1 << 20,
         max_object_entries: 1 << 20,
+        max_object_manifest_bytes: 4 << 20,
+        object_bytes_per_entry: 1024,
     };
     let refused = rig.front.ingest(lease(), &key, &action, &capped).await;
     assert!(
@@ -845,6 +849,8 @@ async fn a_pack_over_the_executors_caps_is_too_large() {
         max_pack_bytes: 1 << 20,
         max_blob_bytes: 3_999,
         max_object_entries: 1 << 20,
+        max_object_manifest_bytes: 4 << 20,
+        object_bytes_per_entry: 1024,
     };
     let other = LeaseId::new(7, 4);
     let refused = rig.front.ingest(other, &key, &action, &capped).await;

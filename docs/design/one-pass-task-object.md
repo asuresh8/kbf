@@ -134,9 +134,40 @@ into the action's root):
 So the input tree is composed per action from digests, and the object is only where file bytes live: each manifest entry
 points at a span of it.
 
-**Status.** This pull request writes the object and the index and reads the index back in its tests. The frontend's
-derivation of tierstore manifests from it, and of Directory/Tree records without reading the Trees, is the next change; the
-ingest here still builds the result from the manifest and records the entries, as for a pack.
+**What the frontend does with it** (`kbf-front`, `output_index.rs`, `untrusted/one_pass.rs`,
+`TreeWriter::publish_output`). At ingest, after the manifest and the records are checked:
+
+1. **The index must agree with the manifest.** Every output file and symlink of the manifest is in the index with the same
+   digest, mode and target; the `Directory` and `Tree` messages derived from the index for each output directory (names
+   sorted bytewise, a directory's files, directories and symlinks each in that order, the `Tree`'s children in the pre-order
+   the walk of `kbf-outputs` opens them) have **exactly the Tree digest the manifest names**, else `BadManifest`. The derived
+   Tree is byte for byte what `kbf-outputs` builds from the directory (the test
+   `the_tree_derived_is_the_one_kbf_outputs_builds_from_the_directory` runs the real collection over a tree with nested,
+   empty and executable entries). Every non-empty file the index names must be a record of the object, else `Incomplete`.
+2. **The ActionResult** is built from the manifest as before; the index agreeing with it is what makes the Trees the task
+   wrote in the object trustworthy without reading them.
+3. **The tierstore side.** Given the frontend's `TreeWriter`, each output directory's `Directory` records are turned into
+   tierstore manifests bottom-up by the encoder that builds action trees (`action_tree/encode.rs`), each file child with
+   `source` = {this object's key, the offset of its record}, stored create-only at `cas/l/<sha256 of the manifest>` and
+   **remembered in the writer's memo under the `Directory` digest**. A later action whose input root holds a subtree equal to
+   that output directory (same `Directory` digest) finds the manifest in the memo and writes nothing for it; only the newly
+   composed top-level directories are written. The manifest digests are the ones the frontend would publish itself, since it is
+   the same encoder over the same facts, so publishing stays deduplicated against any earlier publication. A store that
+   refuses the write is logged and costs the reuse, never the run (`a_manifest_that_cannot_be_published_costs_the_reuse_and_not_the_run`).
+   The memo is the existing one: bounded, expiring after ten minutes, forgotten by input root.
+
+All of it exists only for an object the gate (`--task-out-format one-pass`, default `packs`) made a task write; an object of
+the packs format is read as before and nothing is derived. The tail bounds of 5.1 are config as well: the manifest cap
+(`--task-max-object-manifest-bytes`, default 4 MiB) and the allowance of a record (`--task-object-bytes-per-entry`, default
+1024), with `--task-max-object-entries`.
+
+**Large files inside an output directory.** In the packs format a file over the record cap inside an output directory was
+refused at the manifest check (`large slot 0 ... no output names`). Main's #2330 fixed that for the packs format (the validator
+no longer requires a large entry to be an output's digest; the frontend refuses one that is neither an output's nor a file of
+an output directory's tree), and this branch, merged with it, passes that test
+(`a_directory_output_with_a_file_over_the_record_cap_packs_and_validates`,
+`a_large_object_inside_an_output_directory_is_stored_and_the_run_cached`). A one-pass object has no such case: a large blob is a
+record like any other.
 
 ## 4. The one-pass algorithm, and dedup
 

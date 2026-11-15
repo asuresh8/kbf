@@ -277,6 +277,7 @@ pub async fn ingest_set(
         action,
         limits,
         proof: Proof::EveryByte,
+        publish: None,
     };
     ended(packs, done).await
 }
@@ -326,6 +327,9 @@ pub(super) struct Ingest<'a> {
     pub(super) action: &'a Digest,
     pub(super) limits: &'a UntrustedLimits,
     pub(super) proof: Proof,
+    /// Where a one-pass object's output directories are published as tierstore manifests, if the
+    /// frontend writes action trees.
+    pub(super) publish: Option<&'a crate::action_tree::TreeWriter>,
 }
 
 /// What an ingest made of a run that ran.

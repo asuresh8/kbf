@@ -62,6 +62,24 @@ pub async fn ingest_put_dir(
     action: &Digest,
     limits: &UntrustedLimits,
 ) -> Ingested {
+    ingest_put_dir_with(packs, backend, mint, lease, dir, action, limits, None).await
+}
+
+/// [`ingest_put_dir`] that also publishes, for a one-pass object, the tierstore manifests of its
+/// output directories through `publish` (the frontend's action-tree writer), so that a later
+/// input root holding an equal subtree finds them in its memo. A manifest that cannot be
+/// published is logged and costs only that reuse; the run is ingested all the same.
+#[allow(clippy::too_many_arguments)] // The arguments of `ingest_put_dir`, and the writer.
+pub async fn ingest_put_dir_with(
+    packs: &Packs,
+    backend: &Backend,
+    mint: &PackKeyMint,
+    lease: &str,
+    dir: &IssuedPutDir,
+    action: &Digest,
+    limits: &UntrustedLimits,
+    publish: Option<&crate::action_tree::TreeWriter>,
+) -> Ingested {
     let keys = dir.key_set();
     let done = Ingest {
         packs,
@@ -72,6 +90,7 @@ pub async fn ingest_put_dir(
         action,
         limits,
         proof: Proof::Manifest,
+        publish,
     };
     let ingested = ended(packs, done).await;
     if matches!(ingested, Ingested::Ran { .. }) {

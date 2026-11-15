@@ -70,7 +70,7 @@ pub use self::packed::{
     MAX_UNTRUSTED_MANIFEST_BYTES, MAX_UNTRUSTED_PACK_BYTES, MAX_UNTRUSTED_READ_BYTES,
     MAX_UPLOAD_IDLE_TIMEOUT, MIN_SECRET_BYTES, MintError, PackKeyMint, PackMetrics, PackSettings,
     PackStore, Packs, Pieces, RejectReason, StoreError, UntrustedLimits, VerifyingKeys, ingest,
-    ingest_put_dir, ingest_set, large_key,
+    ingest_put_dir, ingest_put_dir_with, ingest_set, large_key,
 };
 pub(crate) use self::stored::Absent;
 pub use self::stored::Stored;

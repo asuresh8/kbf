@@ -70,6 +70,8 @@ const OUT_MODE: &str = "task_out_mode";
 const OUT_ROOT: &str = "task_out_root";
 const OUT_FORMAT: &str = "task_out_format";
 const MAX_OBJECT_ENTRIES: &str = "task_max_object_entries";
+const MAX_OBJECT_MANIFEST: &str = "task_max_object_manifest_bytes";
+const OBJECT_PER_ENTRY: &str = "task_object_bytes_per_entry";
 const ONE_PASS: &str = "one-pass";
 const PRESIGNED: &str = "presigned";
 const PACKS: &str = "packs";
@@ -104,8 +106,8 @@ const MAX_SECS: u64 = kbf_front::prepare_run::MAX_EXPIRY.as_secs();
 /// The most bytes a secret file or a credentials file may hold.
 const MAX_FILE_BYTES: usize = 4096;
 
-/// The eighteen flags.
-pub(super) fn args() -> [Arg; 18] {
+/// The twenty flags.
+pub(super) fn args() -> [Arg; 20] {
     [
         Arg::new(SECRET)
             .long("task-secret-file")
@@ -313,6 +315,30 @@ pub(super) fn args() -> [Arg; 18] {
                  before it is read, so this bounds what the frontend reads to trust an object \
                  (52 bytes a record)",
             ),
+        Arg::new(MAX_OBJECT_MANIFEST)
+            .long("task-max-object-manifest-bytes")
+            .value_name("BYTES")
+            .value_parser(clap::value_parser!(u64).range(1..))
+            // kbf_front::MAX_UNTRUSTED_MANIFEST_BYTES, as above.
+            .default_value("4194304")
+            .help(
+                "With `--task-out-format one-pass`: the most bytes of an object's manifest, and \
+                 the base of the most its tail (manifest, file index and central directory) may \
+                 be: the base plus `--task-object-bytes-per-entry` for each of \
+                 `--task-max-object-entries`. A larger one is refused as too large before it is \
+                 read",
+            ),
+        Arg::new(OBJECT_PER_ENTRY)
+            .long("task-object-bytes-per-entry")
+            .value_name("BYTES")
+            .value_parser(clap::value_parser!(u64).range(1..))
+            // kbf_front::MAX_UNTRUSTED_BYTES_PER_ENTRY, as above.
+            .default_value("1024")
+            .help(
+                "With `--task-out-format one-pass`: the bytes of an object's tail each record \
+                 may account for, its central directory entry (about 130 bytes) and its line of \
+                 the file index, which names a path. See `--task-max-object-manifest-bytes`",
+            ),
         Arg::new(OUT_FORMAT)
             .long("task-out-format")
             .value_name("FORMAT")
@@ -357,6 +383,10 @@ pub struct TaskFlags {
     pub max_digests: usize,
     /// `--task-max-object-entries`.
     pub max_object_entries: usize,
+    /// `--task-max-object-manifest-bytes`.
+    pub max_object_manifest_bytes: u64,
+    /// `--task-object-bytes-per-entry`.
+    pub object_bytes_per_entry: u64,
     /// `--task-closure-max-bytes`.
     pub max_bytes: u64,
     /// `--task-max-packs`.
@@ -416,6 +446,14 @@ pub(super) fn from_matches(m: &ArgMatches) -> Result<Option<TaskFlags>, String> 
         url_slack: secs(URL_SLACK),
         max_digests: usize::try_from(digests).unwrap_or(usize::MAX),
         max_object_entries: entries_of(m),
+        max_object_manifest_bytes: m
+            .get_one::<u64>(MAX_OBJECT_MANIFEST)
+            .copied()
+            .unwrap_or_default(),
+        object_bytes_per_entry: m
+            .get_one::<u64>(OBJECT_PER_ENTRY)
+            .copied()
+            .unwrap_or_default(),
         max_bytes: m.get_one::<u64>(MAX_BYTES).copied().unwrap_or_default(),
         max_packs: m.get_one::<u8>(MAX_PACKS).copied().unwrap_or_default(),
         max_large: m.get_one::<u8>(MAX_LARGE).copied().unwrap_or_default(),
@@ -489,6 +527,10 @@ pub struct PutDirFlags {
     pub max_digests: usize,
     /// `--task-max-object-entries`.
     pub max_object_entries: usize,
+    /// `--task-max-object-manifest-bytes`.
+    pub max_object_manifest_bytes: u64,
+    /// `--task-object-bytes-per-entry`.
+    pub object_bytes_per_entry: u64,
     /// `--task-closure-max-bytes`.
     pub max_bytes: u64,
 }
@@ -517,6 +559,14 @@ pub(super) fn put_dir_from_matches(m: &ArgMatches) -> Result<Option<PutDirFlags>
         url_slack: Duration::from_secs(m.get_one::<u64>(URL_SLACK).copied().unwrap_or_default()),
         max_digests: usize::try_from(digests).unwrap_or(usize::MAX),
         max_object_entries: entries_of(m),
+        max_object_manifest_bytes: m
+            .get_one::<u64>(MAX_OBJECT_MANIFEST)
+            .copied()
+            .unwrap_or_default(),
+        object_bytes_per_entry: m
+            .get_one::<u64>(OBJECT_PER_ENTRY)
+            .copied()
+            .unwrap_or_default(),
         max_bytes: m.get_one::<u64>(MAX_BYTES).copied().unwrap_or_default(),
     }))
 }

@@ -217,7 +217,7 @@ impl Entry {
                 timeout.as_millis()
             )),
         };
-        self.last.send_replace(answer);
+        drop(self.last.send_replace(answer));
     }
 }
 

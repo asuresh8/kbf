@@ -135,7 +135,10 @@ async fn a_probe_with_no_answer_in_its_timeout_shows_as_failed() {
     rig.mode.store(HANG, Ordering::SeqCst);
     tokio::time::advance(INTERVAL).await;
     until(|| rig.asked.load(Ordering::SeqCst) == 3).await;
-    assert!(answer_now(&rig.checks).is_empty(), "still within its timeout");
+    assert!(
+        answer_now(&rig.checks).is_empty(),
+        "still within its timeout"
+    );
     tokio::time::advance(TIMEOUT).await;
     until(|| !answer_now(&rig.checks).is_empty()).await;
     assert_eq!(
@@ -190,7 +193,10 @@ async fn the_flags_change_the_answer_at_once() {
         .now_or_never()
         .expect("answered without waiting");
     assert_eq!(
-        skipped.iter().map(|failing| failing.check).collect::<Vec<_>>(),
+        skipped
+            .iter()
+            .map(|failing| failing.check)
+            .collect::<Vec<_>>(),
         ["stopping", "leader"]
     );
 
@@ -203,7 +209,11 @@ async fn the_flags_change_the_answer_at_once() {
         ],
         "a handed-over server lists no probe"
     );
-    assert_eq!(rig.asked.load(Ordering::SeqCst), asked, "a flag asked a probe");
+    assert_eq!(
+        rig.asked.load(Ordering::SeqCst),
+        asked,
+        "a flag asked a probe"
+    );
     keeping.abort();
 }
 

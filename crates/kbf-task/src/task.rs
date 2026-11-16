@@ -38,7 +38,6 @@ use kbf_types::Digest;
 use crate::digest;
 use crate::inputs::Inputs;
 use crate::message::FetchError;
-use crate::network;
 use crate::outputs::OutputLimits;
 use crate::pack::PackError;
 use crate::run::{Job, Run, RunError, output_paths, run};
@@ -249,10 +248,7 @@ pub(crate) async fn collected(
     sandbox::notice(&cli.action, &ran.sandbox)
         .into_iter()
         .for_each(|line| eprintln!("{line}"));
-    // Nothing is said of a job's Command: no layer is made, and nothing is unusual.
-    if network != network::Network::Allowed && ran.layers != network::Layers::Job {
-        eprintln!("{}", network::layers_notice(&cli.action, &ran.layers));
-    }
+    // Nothing is said of a job's layers: the job is the sandbox, and no layer is made.
 
     let packing = Instant::now();
     let paths: Vec<String> = output_paths(&command).into_iter().cloned().collect();
@@ -334,7 +330,7 @@ pub(crate) fn exit_code(outcome: Result<TaskManifest, Failure>) -> ExitCode {
     }
 }
 
-/// [`run_cli`] once `protection` (what [`network::protect_this_process`] returned, called before
+/// [`run_cli`] once `protection` (what [`crate::network::protect_this_process`] returned, called before
 /// anything else) is known to have worked: if it did not, the tool stops with the setup exit code
 /// rather than run with the Command able to take its sockets.
 pub fn run_cli_with(protection: std::io::Result<()>, cli: &Cli) -> ExitCode {

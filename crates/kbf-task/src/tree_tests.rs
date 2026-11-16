@@ -472,6 +472,27 @@ async fn a_refused_network_property_is_a_run_start_before_the_run_directory() {
     assert!(!dir.join("work/ran").exists());
 }
 
+/// Asserts that a Command that asks for the network (`kbf-network=allow`) is run like any other in
+/// a tree job: the job is its sandbox, so the property changes nothing the task does.
+#[tokio::test]
+async fn a_command_that_asks_for_the_network_runs_in_the_job_as_any_other() {
+    let dir = scratch("network-allowed");
+    let command = command(&["touch", "ran"], "", &[]);
+    let action = reapi::Action {
+        platform: Some(Platform {
+            properties: vec![Property {
+                name: crate::network::PROPERTY.to_owned(),
+                value: "allow".to_owned(),
+            }],
+        }),
+        ..action_of(&command)
+    };
+    let digest = lay_out(&dir, &action, &command);
+    let (outcome, _put) = run_tree(&tree_cli(&dir, &digest)).await;
+    assert_eq!(outcome.expect("task").exit_code, 0);
+    assert!(dir.join("work/ran").is_file());
+}
+
 /// Asserts that the working directory and the parent of every output path are made under `work`
 /// before the Command starts: `touch` makes no directory, so it succeeds only if they exist, and
 /// its output is collected relative to the working directory.

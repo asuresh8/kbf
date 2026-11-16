@@ -75,7 +75,7 @@ async fn gather(
     limits: OutputLimits,
 ) -> Result<Collected, OutputsError> {
     let file = Shared::default();
-    let spool = Spool::new(Box::new(file.clone()), crate::spool::unreadable());
+    let spool = Spool::new(Box::new(file.clone()));
     let paths: Vec<String> = paths.iter().map(|p| (*p).to_owned()).collect();
     let result = collect_spooled(work, "", &paths, out, err, limits, &spool).await?;
     spool.finish(b"{}", b"").expect("finished");
@@ -225,7 +225,7 @@ async fn the_output_limits_apply() {
 async fn a_file_handed_over_whole_is_refused() {
     let (_dir, _work, out, _err) = rig("handed");
     let store = Spooler {
-        spool: Spool::new(Box::new(Shared::default()), crate::spool::unreadable()),
+        spool: Spool::new(Box::new(Shared::default())),
     };
     assert_eq!(store.in_flight(), IN_FLIGHT);
     let file = std::fs::File::open(out).expect("open");

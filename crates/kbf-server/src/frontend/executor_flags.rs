@@ -34,7 +34,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use clap::{Arg, ArgAction, ArgMatches};
-use kbf_front::action_tree::BaseTree;
+use kbf_front::action_tree::{BaseTree, DEFAULT_TOTAL, PutRetry};
 use kbf_front::{Backend, Packs};
 use kbf_job_client::{Client, Origin, Token};
 use kbf_types::ImageRef;
@@ -505,6 +505,9 @@ pub struct JsAgentFlags {
     /// Where the base tree published from [`JsAgentFlags::base_tree`] is set when the frontend
     /// starts: what the executor writes its action trees over (`--task-out-mode put-dir`).
     pub published: Arc<OnceLock<BaseTree>>,
+    /// `--task-put-retry-secs`: how long the waits for a 503 of the store add up to when the
+    /// executor writes an action tree. Set by the task flags; the default until then.
+    pub put_retry: Duration,
 }
 
 /// What `--executor` says: the daemons, or jobs of a job service.
@@ -677,6 +680,7 @@ fn js_agent_flags(m: &ArgMatches) -> Result<JsAgentFlags, String> {
             .unwrap_or_default(),
         base_tree_timeout: secs(BASE_TREE_TIMEOUT),
         published: Arc::default(),
+        put_retry: DEFAULT_TOTAL,
     })
 }
 
@@ -715,11 +719,10 @@ impl JsAgentFlags {
     #[must_use]
     pub fn front(&self, packs: Packs, backend: Backend, source: RunSource) -> Front {
         let put_dir = match self.config.task_out {
-            TaskOut::PutDir(_) => Some(PutDirParts::new(
-                &packs,
-                &backend,
-                Arc::clone(&self.published),
-            )),
+            TaskOut::PutDir(_) => Some(
+                PutDirParts::new(&packs, &backend, Arc::clone(&self.published))
+                    .with_put_retry(PutRetry::new(self.put_retry)),
+            ),
             TaskOut::Presigned => None,
         };
         Front::new(FrontParts {

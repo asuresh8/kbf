@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use kbf_front::action_tree::{BaseTree, TreeWriter};
+use kbf_front::action_tree::{BaseTree, PutRetry, TreeWriter};
 use kbf_front::prepare_run::{
     KeptClosure, PrepareError as RunPrepError, PrepareFault, PutDirPrep, PutDirRun,
 };
@@ -239,6 +239,13 @@ impl PutDirParts {
             writer: TreeWriter::new(Arc::new(backend.clone()), Arc::new(packs.clone()), clock),
             base,
         }
+    }
+
+    /// These parts writing action trees with `retry`.
+    #[must_use]
+    pub fn with_put_retry(mut self, retry: PutRetry) -> Self {
+        self.writer = self.writer.with_put_retry(retry);
+        self
     }
 }
 

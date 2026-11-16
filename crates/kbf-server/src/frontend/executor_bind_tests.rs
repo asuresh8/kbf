@@ -163,7 +163,9 @@ fn the_task_flags_are_the_executors_settings() {
     let roots = PutDirRoots::new("/mnt/ts/put").expect("roots");
     assert_eq!(put_dir.roots, roots);
     assert_eq!(put_dir.url_slack, Duration::from_secs(600));
-    let config = flags.executor.js.expect("js-agent").config;
+    let js = flags.executor.js.expect("js-agent");
+    let config = js.config;
+    assert_eq!(js.put_retry, Duration::from_secs(60));
     assert_eq!(config.task_out, TaskOut::PutDir(roots));
     assert_eq!(config.max_object_entries, put_dir.max_object_entries);
     assert_eq!(
@@ -175,4 +177,21 @@ fn the_task_flags_are_the_executors_settings() {
         put_dir.object_bytes_per_entry
     );
     assert_eq!(config.presign_ceiling, Duration::from_secs(14_400 - 600));
+}
+
+/// Asserts that `--task-put-retry-secs` reaches the executor's flags and is 60 s by default.
+/// Catches: a flag that parses and is dropped, leaving the writer of action trees at its own
+/// default.
+#[test]
+fn the_put_retry_total_reaches_the_executor() {
+    let flags = parsed(argv(&[], &["--task-put-retry-secs=9"])).expect("accepted");
+    assert_eq!(
+        flags.executor.js.expect("js-agent").put_retry,
+        Duration::from_secs(9)
+    );
+    let flags = parsed(argv(&[], &[])).expect("accepted");
+    assert_eq!(
+        flags.executor.js.expect("js-agent").put_retry,
+        Duration::from_secs(60)
+    );
 }

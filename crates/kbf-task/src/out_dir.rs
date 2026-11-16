@@ -229,14 +229,10 @@ impl OutDir {
             name: name.to_owned(),
             source,
         })?;
-        let read = part.clone();
         stage.parts.push(part);
         Ok(ObjectRun {
             stage,
-            spool: Spool::new(
-                file,
-                Box::new(move |offset, len| read_at(&read, offset, len)),
-            ),
+            spool: Spool::new(file),
         })
     }
 }
@@ -280,14 +276,6 @@ impl ObjectRun<'_> {
             .map_err(write_error(name))?;
         stage.commit(name, &written.object)
     }
-}
-
-/// `len` bytes at `offset` of the file at `path`.
-fn read_at(path: &Path, offset: u64, len: u64) -> io::Result<Vec<u8>> {
-    use std::os::unix::fs::FileExt as _;
-    let mut bytes = vec![0; usize::try_from(len).map_err(io::Error::other)?];
-    std::fs::File::open(path)?.read_exact_at(&mut bytes, offset)?;
-    Ok(bytes)
 }
 
 /// The `.part` files of one run that are not committed yet; they are removed when it is

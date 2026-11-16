@@ -39,6 +39,10 @@ impl Store for Spooler {
         Err("a file was handed over although its bytes go to the object".into())
     }
 
+    fn keep_tree(&self, bytes: &[u8]) {
+        self.spool.keep_tree(bytes);
+    }
+
     fn in_flight(&self) -> usize {
         IN_FLIGHT
     }

@@ -102,7 +102,7 @@ object, and every directory (so an empty one is not lost):
 ```
 
 Each list is sorted bytewise by path; `offset` is absent for the empty file (no record). The task builds it from the Trees
-it wrote itself (read back from its own file after a flush: they are small records of its own, not outputs) and the
+it wrote itself (the task keeps its own copy of each, since a put directory opens a staged file only once, for the create that wrote it, so the object's file is never read back) and the
 manifest. It is a list of facts about this object, and nothing in it is tierstore's or REAPI's.
 
 **Layering.** Two systems name the same folder, and they number it differently:

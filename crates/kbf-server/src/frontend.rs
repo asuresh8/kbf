@@ -98,6 +98,10 @@
 //! probe digest (it passes when one answers), so a farm that has lost its `--storage`
 //! node is ready while its other members are. `READY=1` to the service manager does not
 //! wait for this check (`ready::Ready`); `/readyz` stays failing until storage answers.
+//! The probes are asked in the background, each every `--readyz-probe-interval-ms` and within
+//! `--readyz-store-timeout-ms`, and `/readyz` and the health service answer from the last
+//! answers without waiting for a probe ([`crate::health::Checks::begin`]); a probe with no
+//! answer in its timeout counts as failed, and a drain still turns `/readyz` to 503 at once.
 //!
 //! **Several frontends share one state store.** A frontend hands its work to no successor:
 //! it is stopped, or retired (`POST /v1/frontend/retire`, [`crate::retire`]), and the other
@@ -201,6 +205,7 @@ pub const ALLOWED: &[&str] = &[
     "api_token_file",
     "releases_dir",
     "readyz_store_timeout_ms",
+    "readyz_probe_interval_ms",
     "worker_tls_cert",
     "worker_tls_key",
     "worker_client_ca",
@@ -244,6 +249,7 @@ pub const ALLOWED: &[&str] = &[
     "member_ttl_secs",
     "member_dwell_secs",
     "history_objects",
+    "history_credentials_file",
     "history_index_root",
     "release_poll_every_secs",
     "release_poll_repo",
@@ -531,6 +537,10 @@ pub struct FrontendHandle {
     background: Vec<BoxFuture<'static, ()>>,
     /// Tells the service manager the frontend serves, once its probes pass.
     ready: Ready,
+    /// How often each probe of `/readyz` is asked again (`--readyz-probe-interval-ms`).
+    probe_interval: Duration,
+    /// How long each probe of `/readyz` may take (`--readyz-store-timeout-ms`).
+    probe_timeout: Duration,
     /// The pack index `--pack-index` opened, if the flag was given.
     pack_index: Option<Arc<dyn PackIndex>>,
     /// The packs `--pack-store-endpoint` describes, if the flag was given.
@@ -627,10 +637,17 @@ impl FrontendHandle {
         }
         // Held until the frontend stops: the executor's trees are written over it.
         let _base_tree = base_tree::publish_all(self.base_tree).await?;
+        // Every probe asked once before the listeners serve, so the first `/readyz` has an
+        // answer; from then on it reads the last answers, which this task renews.
+        let probing = self
+            .ready
+            .checks
+            .begin(self.probe_interval, self.probe_timeout)
+            .await;
         let tasks = self
             .background
             .into_iter()
-            .chain([self.ready.run().boxed()]);
+            .chain([self.ready.run().boxed(), probing]);
         let _tasks: Vec<AbortOnDrop> = tasks
             .map(|task| AbortOnDrop(tokio::spawn(task).abort_handle()))
             .collect();
@@ -1331,6 +1348,8 @@ impl<'a> Prepared<'a> {
                 checks,
                 notify: None,
             },
+            probe_interval: Duration::from_millis(args.readyz_probe_interval_ms),
+            probe_timeout: timeout,
             pack_index,
             packs,
             put_dir_prep,

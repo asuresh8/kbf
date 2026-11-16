@@ -63,6 +63,7 @@ fn the_task_flags_are_off_unless_the_secret_file_is_given() {
     let companions = [
         "--task-out-format=one-pass",
         "--task-url-slack-secs=5",
+        "--task-put-retry-secs=90",
         "--task-closure-max-digests=10",
         "--task-closure-max-bytes=1024",
         "--task-max-object-entries=7",
@@ -102,6 +103,7 @@ fn the_flags_make_the_setting_and_the_defaults_are_the_constants() {
     assert_eq!(set.secret_file, PathBuf::from("/etc/kbf/task.secret"));
     assert_eq!(set.roots, PutDirRoots::new("/mnt/ts/put").expect("roots"));
     assert_eq!(set.url_slack, Duration::from_secs(DEFAULT_URL_SLACK_SECS));
+    assert_eq!(set.put_retry, Duration::from_secs(DEFAULT_PUT_RETRY_SECS));
     assert_eq!(set.max_digests, ClosureLimits::DEFAULT.max_digests);
     assert_eq!(set.max_bytes, ClosureLimits::DEFAULT.max_bytes);
     assert_eq!(set.max_object_entries, 1 << 20);
@@ -110,6 +112,7 @@ fn the_flags_make_the_setting_and_the_defaults_are_the_constants() {
 
     let set = put_dir(&[
         "--task-url-slack-secs=0",
+        "--task-put-retry-secs=0",
         "--task-closure-max-digests=1000",
         "--task-closure-max-bytes=1048576",
         "--task-max-object-entries=7",
@@ -117,6 +120,7 @@ fn the_flags_make_the_setting_and_the_defaults_are_the_constants() {
         "--task-object-bytes-per-entry=9",
     ]);
     assert_eq!(set.url_slack, Duration::ZERO);
+    assert_eq!(set.put_retry, Duration::ZERO);
     assert_eq!(set.max_digests, 1_000);
     assert_eq!(set.max_bytes, 1 << 20);
     assert_eq!(set.max_object_entries, 7);
@@ -269,6 +273,7 @@ fn put_dir_flags(dir: &Path) -> PutDirFlags {
         secret_file: file(dir, "task.secret", &format!("{SECRET}\n"), 0o600),
         roots: PutDirRoots::new("/mnt/ts/put").expect("roots"),
         url_slack: Duration::from_secs(DEFAULT_URL_SLACK_SECS),
+        put_retry: Duration::from_secs(DEFAULT_PUT_RETRY_SECS),
         max_digests: ClosureLimits::DEFAULT.max_digests,
         max_object_entries: 1 << 20,
         max_object_manifest_bytes: 4 << 20,

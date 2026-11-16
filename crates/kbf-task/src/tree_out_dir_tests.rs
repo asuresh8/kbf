@@ -457,3 +457,56 @@ async fn a_manifest_naming_a_blob_the_object_lacks_is_refused() {
     );
     assert!(names(&out).is_empty());
 }
+
+/// Asserts that a one-pass run whose outputs include a directory never opens the object's staged
+/// file again to read it. tierstore's put directory opens a staged file once, for the create that
+/// wrote it (`EPERM` for any later open, `EACCES` for a read), so the Tree of the output directory
+/// must come from the task's own copy. The put directory here keeps the object in memory and has
+/// nothing at its path to open, and the run still ends 0 with the file index and every file of
+/// the directory in the object.
+/// Catches the Trees read back from the `.part` file: the run failed with exit 13, "pack: cannot
+/// write it to the put directory: Operation not permitted", on the farm.
+#[tokio::test]
+async fn a_one_pass_run_with_an_output_directory_never_reads_the_staged_file_back() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Held(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Held {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let dir = scratch("one-pass-no-readback");
+    let command = command(&["cp", "-R", "src", "d"], "", &["d"]);
+    let digest = lay_out(&dir, &action_of(&command), &command);
+    std::fs::create_dir(dir.join("work/src")).expect("src");
+    std::fs::write(dir.join("work/src/a"), b"a\n").expect("a");
+    std::fs::write(dir.join("work/src/b"), b"bb\n").expect("b");
+    let out = put_dir(&dir);
+    let held = Held::default();
+    let object = held.clone();
+    let sink = OutDir::open(&out)
+        .expect("open")
+        .with_create(move |_| Ok(Box::new(object.clone())))
+        .with_rename(|_, _| Ok(()));
+    execute_out_dir(&one_pass_cli(&dir, &digest, &out), &dir, &sink)
+        .await
+        .expect("the run ends without opening the staged file again");
+    assert!(names(&out).is_empty(), "{:?}", names(&out));
+    let object = held.0.lock().expect("lock").clone();
+    let (manifest, _, index) = read_one_pass_files(&object);
+    assert_eq!(manifest.exit_code, 0);
+    let paths: Vec<_> = index["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|f| f["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(paths, ["d/a", "d/b"]);
+}

@@ -38,6 +38,7 @@ use crate::executor::PutDirRoots;
 use crate::token::{TokenFileError, read_owner_only};
 
 const SECRET: &str = "task_secret_file";
+const PUT_RETRY: &str = "task_put_retry_secs";
 const URL_SLACK: &str = "task_url_slack_secs";
 const MAX_DIGESTS: &str = "task_closure_max_digests";
 const MAX_BYTES: &str = "task_closure_max_bytes";
@@ -55,6 +56,11 @@ const PUT_DIR: &str = "put-dir";
 /// literal below; this is the number the default-flags test checks it against.
 #[cfg(test)]
 const DEFAULT_URL_SLACK_SECS: u64 = 600;
+
+/// The total wait for a 503 when `--task-put-retry-secs` is left out: 60 seconds (test-only, as
+/// above).
+#[cfg(test)]
+const DEFAULT_PUT_RETRY_SECS: u64 = 60;
 
 /// The longest slack a flag takes, in seconds: the 4 hour ceiling of the keys of a put
 /// directory ([`kbf_front::prepare_run::MAX_EXPIRY`]).
@@ -119,13 +125,13 @@ fn refuse(_: &str) -> Result<String, &'static str> {
     Err(REMOVED_WHY)
 }
 
-/// The ten flags of the put directory and the ten removed ones.
+/// The eleven flags of the put directory and the ten removed ones.
 pub(super) fn args() -> Vec<Arg> {
     live().into_iter().chain(removed()).collect()
 }
 
-/// The ten flags that are read.
-fn live() -> [Arg; 10] {
+/// The eleven flags that are read.
+fn live() -> [Arg; 11] {
     [
         Arg::new(SECRET)
             .long("task-secret-file")
@@ -141,6 +147,15 @@ fn live() -> [Arg; 10] {
                  directories is made from it, and it is the secret the job-facing listener \
                  verifies grants with. The secret is never a flag: a command line is \
                  world-readable. Needs `--task-out-root`. Left out, no run is prepared",
+            ),
+        Arg::new(PUT_RETRY)
+            .long("task-put-retry-secs")
+            .value_name("SECONDS")
+            .value_parser(clap::value_parser!(u64).range(0..=MAX_SECS))
+            // DEFAULT_PUT_RETRY_SECS, as above.
+            .default_value("60")
+            .help(
+                "The most seconds the waits add up to before a create-only write of an action tree to the tier store (`cas/l/<sha256>`) gives up on a 503 (\"retry later\", which the store answers while it registers: 10 to 40 s), so the lease fails only after this long. A write whose connection turns out to be dead is made once more at once, whatever this says. 0 never waits for a 503. Used only with `--task-secret-file` and `--task-out-mode put-dir`",
             ),
         Arg::new(URL_SLACK)
             .long("task-url-slack-secs")
@@ -262,6 +277,8 @@ pub struct PutDirFlags {
     pub roots: PutDirRoots,
     /// `--task-url-slack-secs`: the time past a run's wall that its directory's keys stay good.
     pub url_slack: Duration,
+    /// `--task-put-retry-secs`.
+    pub put_retry: Duration,
     /// `--task-closure-max-digests`.
     pub max_digests: usize,
     /// `--task-max-object-entries`.
@@ -294,6 +311,7 @@ pub(super) fn from_matches(m: &ArgMatches) -> Result<Option<PutDirFlags>, String
         secret_file: secret_file.clone(),
         roots: PutDirRoots::new(root).map_err(|error| format!("--task-out-root: {error}"))?,
         url_slack: Duration::from_secs(m.get_one::<u64>(URL_SLACK).copied().unwrap_or_default()),
+        put_retry: Duration::from_secs(m.get_one::<u64>(PUT_RETRY).copied().unwrap_or_default()),
         max_digests: usize::try_from(digests).unwrap_or(usize::MAX),
         max_object_entries: entries_of(m),
         max_object_manifest_bytes: m

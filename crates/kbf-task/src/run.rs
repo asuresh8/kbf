@@ -1347,7 +1347,7 @@ mod tests {
     async fn a_relay_that_cannot_be_started_is_named_as_the_relay() {
         let rig = Rig::new("relay-missing");
         let root = rig.root();
-        let ran = run(
+        let error = run(
             &program(&["true"]),
             &Run {
                 root: &root,
@@ -1362,10 +1362,8 @@ mod tests {
                 job: None,
             },
         )
-        .await;
-        let Err(error) = ran else {
-            panic!("a relay that does not exist was started");
-        };
+        .await
+        .expect_err("a relay that does not exist was started");
         assert!(
             matches!(
                 error,

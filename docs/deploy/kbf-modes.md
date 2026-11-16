@@ -151,16 +151,13 @@ and a tag is refused. It needs both image flags, and the job service (`--executo
 on the frontend's jobs, by which a restarted frontend finds and cancels those an earlier process
 left, and hashed into every job id; it must be different for each frontend, so a `kbf.toml` is
 not copied to a second frontend with it), the packs (`--pack-store-endpoint`, through which the
-pack a task writes is read, hashed and turned into the action's result) and the delivery of the
-secrets, `--executor-secret-delivery`. With `argv`, the default, the presigned write url and the
-read token travel as arguments of the job, where the action can read them, and
-`--executor-insecure-argv-secrets` says the operator accepts it. With `files` each is a file of the
-job, which its host writes read-only at `/run/js-files`, and the task tool is given the paths
-(`--pack-url-file`, `--grant-token-file`): no argument holds a secret, and
-`--executor-insecure-argv-secrets` is refused with it. There is no fall back to arguments: a host
-whose agent cannot write the files refuses to start the job (`files-unsupported`) and the action
-is rerun; `invalid-file` ends the action as invalid. `files` is refused with `--executor
-kbf-daemon`, which builds no command line. The executor no longer speaks to a lease server: the
+pack a task writes is read, hashed and turned into the action's result) and nothing else for the
+output: a put-dir job (the only mode, `--task-out-mode put-dir`) carries no url, no grant and no secret, and its pack is a file
+of its put directory, which the frontend ingests. The executor's presigned path (a write url, a read token, `--executor-secret-delivery`
+`argv` or `files`) is still in the code and no flag selects it: `--executor-secret-delivery`, `--executor-insecure-argv-secrets`,
+`--executor-work-dir`, `--executor-allow-plain-http-put`, `--executor-allow-plain-http-grant` and `--executor-locate` are still
+read and checked at start (so a `kbf.toml` that sets them keeps starting) and change nothing a put-dir job is given. They are
+deleted, with that path and the test rigs built on it, in the change that follows the removal of the presigned task-out mode. The executor no longer speaks to a lease server: the
 flags `--executor-lease-url`, `--executor-lease-token-file`, `--executor-lease-ca-file`,
 `--executor-lease-ttl-secs` and `--executor-class` are gone, and a frontend started with one (or
 a `kbf.toml` that names one) fails at start naming it. `--executor-output-disk-bytes`, the scratch
@@ -200,30 +197,10 @@ the Command leaves as it ends while the Command runs, and kills and reaps every 
 included, before the outputs are read. The job log has no sandbox or
 network line for it: nothing is made, so nothing is unusual.
 
-Today's job (the grant mode, without `--tree`) keeps its sandbox. The task tool starts the Command
-in mount and PID namespaces of its own (`crates/kbf-task/src/sandbox.rs`), made by the same `unshare`
-as its user and network namespaces. The job's files at `/run/js-files` (the read token and the write
-URLs of `--executor-secret-delivery files`) and the parent of the tool's work directory (`/scratch`,
-which holds the input root, the run's `private/` directory and the captured stdout and stderr) are
-covered by an empty read-only tmpfs, with the input root and `private/` bound again at their own
-paths, so the Command's working directory and its `HOME`, `TMPDIR` and cache variables still name
-them. `/tmp`, `/var/tmp`, `/run` and `/root` are the run's own `private/tmp`, `private/var-tmp`,
-`private/run` and `private/home`: on the job's scratch disk and executable, where the job's own
-`/tmp` is a 64 MiB `noexec` tmpfs. The Command is the second process of its PID namespace (the
-tool starts it through two processes of its own binary, `kbf-task --sandbox-relay` outside the
-namespace and `--sandbox-init` as its first process), and
-every process it started is ended when it ends, before its outputs are read, whether or not it
-left its process group. It holds no capability and runs under `no_new_privs`, also when it is
-allowed the network (`kbf-network=allow`), so a set-id program or a file capability gives it none,
-and it cannot take a cover off. The namespace keeps the job's `/proc`. A Command that runs as root
-gets the mount and PID namespaces without a user namespace, and could unmount the covers; the
-kbf image runs as a user other than root. The outputs are then read with `openat2`, refusing any
-symlink, magic link or `..` in any component. Each action's job log has the line
-`kbf-task: action <digest>: sandbox: mount and pid namespaces`, or `sandbox: incomplete (<step>
-<errno>)` where the host refused a step (a host that does not let an unprivileged user namespace
-keep its capabilities, AppArmor's `apparmor_restrict_unprivileged_userns`, refuses `setgroups` or
-`uid_map`): the steps before it hold, the action still runs, and what it would have hidden is
-visible to it. `kbf-task --probe-confinement` prints the same as `probe sandbox:`.
+`kbf-task` has no other mode: it refuses `--grant-url`, `--pack-url-file`, `--put-urls-file`, `--fetch-*`, `--locate` and
+`--work-dir` (exit 2), so the mount and PID namespaces of its former grant mode, the `sandbox: ...` job log line and the covers
+of `/run/js-files` and `/scratch` no longer exist for a job. Its confinement code (`crates/kbf-task/src/sandbox.rs`) is
+reached only by `kbf-task --probe-confinement`, which prints `probe sandbox:`.
 
 The executor runs on exactly one frontend: it looks for another frontend's live jobs on the job
 service before its first pass and every 40 s after, and a frontend that finds some older than its
@@ -257,15 +234,9 @@ of the frontend's log, `the end of the standard error of a job that did not end 
 output goes with the result as before), `--executor-max-run-secs` and `--executor-default-timeout-secs`
 (3000), `--executor-call-timeout-secs` (5), `--executor-poll-ms` (1000, from 100 to 10000: how often the executor polls the job service), `--executor-prepare-limit-secs` (300: how long a run's input
 tree may take to publish; the `Start` window ends the submit, not the preparation), `--executor-prepare-concurrency` (4: how many of one
-worker's runs prepare at once; the rest wait their turn inside their window), `--executor-work-dir` (for the task tool),
-`--executor-allow-plain-http-put` (until the store serves TLS), and
-`--executor-allow-plain-http-grant` (a read listener without TLS, on a farm's own network; both
-plain-http flags are off by default), and `--executor-locate` (off by default: the task is given
-`--locate` and asks the listener's `GET /locate` once; the answer names no store and no grant
-(tierstore v0.3.29 removed the store read grants), so the task reads every input from the listener;
-refused with `--executor kbf-daemon`; the task image must carry kbf-task
-v0.0.44 or later, the first release that knows `--locate`: an older one refuses the flag and every
-job fails), and `--executor-network` (the network every job is given on its host: `allow-list`,
+worker's runs prepare at once; the rest wait their turn inside their window), `--executor-work-dir`, `--executor-allow-plain-http-put`, `--executor-allow-plain-http-grant` and `--executor-locate`
+(read and checked at start, with no effect on a put-dir job: they belong to the presigned path that a following change deletes;
+`--executor-locate` is still refused with `--executor kbf-daemon`), and `--executor-network` (the network every job is given on its host: `allow-list`,
 the default, the endpoints the host's agent is set up to allow and nothing else, so each agent must
 allow the read listener and the pack store before the switch; `none`, no route out, with which
 every action fails; `open`, any address but those the agent always denies, refused at start unless

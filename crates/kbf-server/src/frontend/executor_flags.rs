@@ -477,12 +477,6 @@ pub(super) fn args() -> Vec<Arg> {
     ]
 }
 
-/// Whether the flags say a read grant may be served over plain http: `--executor js-agent` with
-/// `--executor-allow-plain-http-grant`. With daemons nothing reads the flag, so it opens nothing.
-pub(super) fn plain_http_grant(m: &ArgMatches) -> bool {
-    m.get_one::<String>(KIND).is_some_and(|k| k == "js-agent") && m.get_flag(PLAIN_GRANT)
-}
-
 /// What `--executor js-agent` and its companions say.
 #[derive(Clone, Debug)]
 pub struct JsAgentFlags {

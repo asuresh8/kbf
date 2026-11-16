@@ -30,17 +30,17 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::digest;
 use crate::files;
-use crate::out_dir::{OutDirError, pack_name};
-use crate::outputs::{OutputLimits, Outputs, collect_spooled};
+use crate::out_dir::{OBJECT_NAME, OutDirError};
+use crate::outputs::{OutputLimits, collect_spooled};
 use crate::task::Failure;
 
-/// What `--stage-and-commit` writes (`--object-format`).
+/// What the task writes (`--object-format`): the one-pass object, always. The flag is still
+/// accepted, so that a frontend that sends it (every one since the one-pass object) and one that
+/// does not both work; the packs format it once chose between is gone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum ObjectFormat {
-    /// Packs and large objects, planned from the digests: the format before one-pass.
-    #[default]
-    Packs,
     /// One object, written while the outputs are read.
+    #[default]
     OnePass,
 }
 
@@ -73,7 +73,7 @@ pub(crate) async fn collect(
     paths: (&Path, &str, &[String]),
     logs: (&Path, &Path),
     limits: OutputLimits,
-) -> Result<Outputs, Failure> {
+) -> Result<reapi::ActionResult, Failure> {
     let (root, working_directory, outputs) = paths;
     let collecting = collect_spooled(
         root,
@@ -86,7 +86,7 @@ pub(crate) async fn collect(
     );
     match (collecting.await, spool.write_failure()) {
         (Err(_), Some(source)) => Err(OutDirError::Write {
-            name: pack_name(0),
+            name: OBJECT_NAME.to_owned(),
             source,
         }
         .into()),

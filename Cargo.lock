@@ -2802,14 +2802,10 @@ dependencies = [
  "prost",
  "prost-types",
  "rustix",
- "rustls",
- "rustls-native-certs",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
- "tierstore",
  "tokio",
- "ureq",
 ]
 
 [[package]]

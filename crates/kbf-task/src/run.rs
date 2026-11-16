@@ -1367,7 +1367,13 @@ mod tests {
             panic!("a relay that does not exist was started");
         };
         assert!(
-            matches!(error, RunError::Spawn { stage: Stage::Relay, .. }),
+            matches!(
+                error,
+                RunError::Spawn {
+                    stage: Stage::Relay,
+                    ..
+                }
+            ),
             "{error}"
         );
     }

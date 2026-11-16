@@ -214,9 +214,9 @@ async fn the_output_limits_apply() {
         max_stdio_bytes: 4,
         ..OutputLimits::default()
     };
-    let why = gather(&work, &out, &err, &[], limits)
-        .await
-        .expect_err("stdout is over");
+    let Err(why) = gather(&work, &out, &err, &[], limits).await else {
+        panic!("stdout is over");
+    };
     assert!(matches!(why, OutputsError::Limit { .. }), "{why}");
 }
 

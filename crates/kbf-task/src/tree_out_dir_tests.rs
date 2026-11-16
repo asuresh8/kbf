@@ -4,7 +4,7 @@
 use super::*;
 use crate::out_dir::OutDir;
 use crate::pack::MAX_LARGE_BYTES;
-use crate::task::EXIT_PUT;
+use crate::task::{EXIT_PUT, EXIT_SETUP, main_with};
 
 /// `--stage-and-commit` with `--out-dir` set to `out`.
 fn out_flags(out: &Path) -> [String; 2] {

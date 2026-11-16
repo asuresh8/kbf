@@ -1339,4 +1339,36 @@ mod tests {
             ]
         );
     }
+
+    /// Catches the start of a missing relay being reported as the Command's own: with a relay
+    /// given, the first process the tool starts is the relay, and the error names that stage.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_relay_that_cannot_be_started_is_named_as_the_relay() {
+        let rig = Rig::new("relay-missing");
+        let root = rig.root();
+        let ran = run(
+            &program(&["true"]),
+            &Run {
+                root: &root,
+                private: &rig.private(),
+                stdout: &rig.stdout,
+                stderr: &rig.stderr,
+                deadline: LONG,
+                network: NETWORK,
+                unreadable: &[],
+                hidden: &[],
+                relay: Some(Path::new("/no/such/kbf-task")),
+                job: None,
+            },
+        )
+        .await;
+        let Err(error) = ran else {
+            panic!("a relay that does not exist was started");
+        };
+        assert!(
+            matches!(error, RunError::Spawn { stage: Stage::Relay, .. }),
+            "{error}"
+        );
+    }
 }

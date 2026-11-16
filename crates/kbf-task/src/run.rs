@@ -665,11 +665,13 @@ fn children_usage() -> ChildrenUsage {
     };
     ChildrenUsage {
         cpu_us: micros(usage.ru_utime) + micros(usage.ru_stime),
-        // Linux reports the peak resident set in KiB, macOS in bytes.
-        peak_rss_bytes: u64::try_from(usage.ru_maxrss).unwrap_or(0)
-            * if cfg!(target_os = "macos") { 1 } else { 1024 },
+        peak_rss_bytes: u64::try_from(usage.ru_maxrss).unwrap_or(0) * MAXRSS_UNIT,
     }
 }
+
+/// The bytes of one unit of `ru_maxrss`: Linux reports the peak resident set in KiB, macOS in
+/// bytes. A constant, so that the system this is not built for is no branch no test can take.
+const MAXRSS_UNIT: u64 = if cfg!(target_os = "macos") { 1 } else { 1024 };
 
 #[cfg(test)]
 mod tests {
@@ -1299,11 +1301,14 @@ mod tests {
             ..Command::default()
         };
         let result = rig.run(&command, LONG).await;
-        if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        {
             let ran = result.expect("sandbox-exec ran");
             assert_ne!(ran.exit_code, 0);
             assert!(rig.err().contains("no-such-program"), "{}", rig.err());
-        } else {
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
             let error = result.expect_err("refused");
             assert!(matches!(error, RunError::Spawn { .. }), "{error}");
             assert_eq!(

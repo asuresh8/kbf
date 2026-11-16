@@ -256,6 +256,12 @@ impl Store for Recorder {
         Ok(digest)
     }
 
+    fn keep_tree(&self, bytes: &[u8]) {
+        if let Some(spool) = &self.spool {
+            spool.keep_tree(bytes);
+        }
+    }
+
     fn in_flight(&self) -> usize {
         IN_FLIGHT
     }
@@ -610,7 +616,7 @@ mod tests {
         std::fs::write(work.join("large"), &large).expect("large");
         std::fs::write(work.join("small"), b"small").expect("small");
         let file = Shared::default();
-        let spool = Spool::new(Box::new(file.clone()), crate::spool::unreadable());
+        let spool = Spool::new(Box::new(file.clone()));
         let paths = ["large".to_owned(), "small".to_owned()];
         let outputs = collect_spooled(
             &work,
@@ -638,10 +644,7 @@ mod tests {
         for blob in [&large[..], b"small", b"to stdout", b"to stderr"] {
             assert!(held.contains(&kbf_segments::sha256(blob)));
         }
-        let recorder = Recorder::spooling(Spool::new(
-            Box::new(Shared::default()),
-            crate::spool::unreadable(),
-        ));
+        let recorder = Recorder::spooling(Spool::new(Box::new(Shared::default())));
         let file = std::fs::File::open(out).expect("open");
         let why = recorder
             .put_file(file, digest_of(b"x"))

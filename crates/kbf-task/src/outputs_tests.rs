@@ -80,8 +80,8 @@ async fn gather(
     let result = collect_spooled(work, "", &paths, out, err, limits, &spool).await?;
     spool.finish(b"{}", b"").expect("finished");
     let object = file.0.lock().expect("lock").clone();
-    let trailer = Trailer::parse(&object[object.len() - TAIL_LEN..], object.len() as u64)
-        .expect("trailer");
+    let trailer =
+        Trailer::parse(&object[object.len() - TAIL_LEN..], object.len() as u64).expect("trailer");
     let tail = &object[object.len() - usize::try_from(trailer.tail_len()).expect("fits")..];
     let entries = Tail::parse(&trailer, tail).expect("tail").entries;
     Ok(Collected {
@@ -100,9 +100,15 @@ async fn files_are_collected_with_their_executable_bit() {
     std::fs::write(work.join("tool"), b"tool bytes\n").expect("tool");
     std::fs::set_permissions(work.join("tool"), std::fs::Permissions::from_mode(0o755))
         .expect("chmod");
-    let got = gather(&work, &out, &err, &["plain", "tool"], OutputLimits::default())
-        .await
-        .expect("collect");
+    let got = gather(
+        &work,
+        &out,
+        &err,
+        &["plain", "tool"],
+        OutputLimits::default(),
+    )
+    .await
+    .expect("collect");
     let files = &got.result.output_files;
     assert_eq!(files.len(), 2);
     assert_eq!(

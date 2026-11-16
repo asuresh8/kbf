@@ -57,12 +57,12 @@ pub(crate) mod child;
 pub mod digest;
 pub mod files;
 mod inputs;
+pub mod message;
 pub mod network;
 #[cfg(target_os = "linux")]
 mod orphans;
 pub mod out_dir;
 pub mod outputs;
-pub mod message;
 pub mod pack;
 pub mod probe;
 #[cfg(target_os = "linux")]

@@ -77,8 +77,16 @@ fn the_task_flags_are_off_unless_the_secret_file_is_given() {
 #[test]
 fn the_flags_need_each_other() {
     let missing = ErrorKind::MissingRequiredArgument;
-    assert_eq!(refused(&[PUT_DIR_ONLY[0]]), missing, "the secret needs the root");
-    assert_eq!(refused(&[PUT_DIR_ONLY[1]]), missing, "the root needs the secret");
+    assert_eq!(
+        refused(&[PUT_DIR_ONLY[0]]),
+        missing,
+        "the secret needs the root"
+    );
+    assert_eq!(
+        refused(&[PUT_DIR_ONLY[1]]),
+        missing,
+        "the root needs the secret"
+    );
     assert_eq!(
         refused(&["--task-out-mode=put-dir"]),
         missing,

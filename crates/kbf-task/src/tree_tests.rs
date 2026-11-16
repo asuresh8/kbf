@@ -581,8 +581,14 @@ fn a_tree_job_takes_its_root_and_refuses_the_flags_of_the_presigned_mode() {
     assert_eq!(tree.root(), Path::new("/t"));
     assert!(tree.stage_and_commit);
     let action = format!("--action={action}");
-    let bare = Cli::try_parse_from(["kbf-task", "--tree", "--stage-and-commit", "--lease=l", &action])
-        .expect("bare");
+    let bare = Cli::try_parse_from([
+        "kbf-task",
+        "--tree",
+        "--stage-and-commit",
+        "--lease=l",
+        &action,
+    ])
+    .expect("bare");
     assert_eq!(bare.root(), Path::new("/"));
 
     for flag in [
@@ -602,9 +608,13 @@ fn a_tree_job_takes_its_root_and_refuses_the_flags_of_the_presigned_mode() {
         "--work-dir=/w",
         "--root-der=r",
     ] {
-        let error = flags(Path::new("/t"), &sha256(b"a"), &["--stage-and-commit", flag])
-            .err()
-            .expect(flag);
+        let error = flags(
+            Path::new("/t"),
+            &sha256(b"a"),
+            &["--stage-and-commit", flag],
+        )
+        .err()
+        .expect(flag);
         assert_eq!(error.kind(), ClapKind::UnknownArgument, "{flag}");
     }
 

@@ -952,8 +952,7 @@ impl<'a> Prepared<'a> {
         crate::serve::log_exclusive(listeners.exclusive_actions);
         let farm = Arc::new(farm.with_state(state)?);
         log_state(durable, farm.term(), farm.lease_epoch());
-        let source = source
-            .or_else(|| put_dir_prep.as_ref().map(RunSource::of_put_dir));
+        let source = source.or_else(|| put_dir_prep.as_ref().map(RunSource::of_put_dir));
         let executor = executor_of(flags, &farm, packs.as_ref(), &backend, source, timeout)?;
         let checks = match &plane {
             stored::Plane::Node { storage, .. } => checks(

@@ -170,6 +170,9 @@ fn the_task_flags_are_the_executors_settings() {
         config.max_object_manifest_bytes,
         put_dir.max_object_manifest_bytes
     );
-    assert_eq!(config.object_bytes_per_entry, put_dir.object_bytes_per_entry);
+    assert_eq!(
+        config.object_bytes_per_entry,
+        put_dir.object_bytes_per_entry
+    );
     assert_eq!(config.presign_ceiling, Duration::from_secs(14_400 - 600));
 }

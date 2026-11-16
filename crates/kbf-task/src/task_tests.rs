@@ -176,7 +176,10 @@ fn an_outcome_is_its_exit_code() {
 /// process with the setup code, and the Command never starts.
 #[test]
 fn run_cli_runs_the_task_and_returns_its_exit_code() {
-    let mut flags = cli(Path::new("/nonexistent-root"), Path::new("/nonexistent-out"));
+    let mut flags = cli(
+        Path::new("/nonexistent-root"),
+        Path::new("/nonexistent-out"),
+    );
     flags.lease = "a/b".to_owned();
     assert_eq!(run_cli(&flags), ExitCode::from(EXIT_SETUP));
     assert_eq!(

@@ -149,7 +149,12 @@ fn out_dir_defaults_to_out() {
     let (dir, digest) = copy_tree("out-dir-flags");
     let cli = flags(&dir, &digest, &["--stage-and-commit"]).expect("flags");
     assert_eq!(cli.out_dir(), Path::new("/out"));
-    let cli = flags(&dir, &digest, &["--stage-and-commit", "--out-dir=/elsewhere"]).expect("flags");
+    let cli = flags(
+        &dir,
+        &digest,
+        &["--stage-and-commit", "--out-dir=/elsewhere"],
+    )
+    .expect("flags");
     assert_eq!(cli.out_dir(), Path::new("/elsewhere"));
 }
 

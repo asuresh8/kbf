@@ -11,10 +11,7 @@ fn a_manifest_refusal_is_a_size_cap_or_an_invalid_manifest() {
     assert_eq!(too_large.detail, OUTPUT_TOO_LARGE);
     assert_eq!(
         too_large.to_string(),
-        format!(
-            "output-too-large: {}",
-            ManifestError::TooLarge { len: 9 }
-        )
+        format!("output-too-large: {}", ManifestError::TooLarge { len: 9 })
     );
 
     let other = PackError::from(ManifestError::Version(9));

@@ -62,10 +62,7 @@ fn a_file_that_is_not_the_blob_is_a_mismatch_naming_the_file() {
         std::fs::write(&path, &held).expect("rewrite");
         let error = file_message::<Action>(&path, &digest).expect_err("mismatch");
         let text = error.to_string();
-        assert!(
-            matches!(error, FetchError::Mismatch { .. }),
-            "{text}"
-        );
+        assert!(matches!(error, FetchError::Mismatch { .. }), "{text}");
         assert!(text.contains(why), "{text}");
         assert!(
             text.ends_with(&format!(", as read from {}", path.display())),

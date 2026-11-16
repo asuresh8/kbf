@@ -109,9 +109,7 @@ fn removed() -> impl Iterator<Item = Arg> {
             .long(long)
             .hide(true)
             .value_name("VALUE")
-            .help(
-                "Removed with `--task-out-mode presigned`. Any value is refused at start",
-            )
+            .help("Removed with `--task-out-mode presigned`. Any value is refused at start")
             .value_parser(ValueParser::new(refuse))
     })
 }

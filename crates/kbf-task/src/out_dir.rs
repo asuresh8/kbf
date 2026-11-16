@@ -1,5 +1,5 @@
-//! The put directory (`--stage-and-commit`): the run's one object is written as a file into
-//! `--out-dir` and committed by `rename`, instead of PUT to presigned URLs.
+//! The put directory: the run's one object is written as a file into `--out-dir` and committed by
+//! `rename`.
 //!
 //! In a job the directory is a mount of tierstore's put directory: a file written there and
 //! renamed to a name without `.part` becomes an object under the key prefix the frontend chose,

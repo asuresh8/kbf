@@ -80,9 +80,9 @@
 //! kbf base tree to the packs' store from `--executor-base-tree` (`base_tree`).
 //!
 //! **Task runs** are prepared only if `--task-secret-file` is given (`task_flags` has the flags
-//! and what they need): the started frontend then carries a [`kbf_front::prepare_run::RunPrep`]
-//! ([`FrontendHandle::run_prep`]) that gives a host executor, for each run, the key the task may
-//! write, one presigned write of it to the tier store and a read grant for its inputs; without
+//! and what they need): the started frontend then carries a [`kbf_front::prepare_run::PutDirPrep`]
+//! ([`FrontendHandle::put_dir_prep`]) that gives a host executor, for each run, the put directory
+//! the task commits its object into and the closure its action tree is written from; without
 //! the flag no secret file is read and the frontend serves exactly as it did.
 //!
 //! **The `cas/b/` janitor** is off unless `--task-janitor-key-file` is given (`janitor` has the
@@ -136,7 +136,7 @@ use clap::{ArgMatches, FromArgMatches as _};
 use futures::FutureExt as _;
 use futures::future::{AbortHandle, Abortable, BoxFuture};
 use kbf_auth::AuthenticateLayer;
-use kbf_front::prepare_run::{PutDirPrep, RunPrep};
+use kbf_front::prepare_run::PutDirPrep;
 use kbf_front::{
     Backend, MAX_MESSAGE_BYTES, Owner, Owners, Packs, Proxy, RECORDER_CHANNEL, Recorder,
     RequestMetadataLayer, Routed,
@@ -159,7 +159,7 @@ use self::executor_open::executor_of;
 pub use self::janitor::{Janitor, JanitorFlagError, JanitorFlags, JanitorMetrics};
 pub use self::job_read::{JobReadError, JobReadFlags, JobTls};
 pub use self::pack_flags::{PackFlagError, PackFlags};
-pub use self::task_flags::{PutDirFlags, TaskFlagError, TaskFlags};
+pub use self::task_flags::{PutDirFlags, TaskFlagError};
 use crate::drain::Drain;
 use crate::enroll::flags::EnrollFlags;
 use crate::enroll::start as enroll_start;
@@ -302,12 +302,8 @@ pub struct FrontendFlags {
     /// inputs from with a read grant. `None` without `--job-listen`, where there is none.
     pub job_read: Option<JobReadFlags>,
     /// `--task-secret-file` and its companions: the frontend prepares the runs of a host
-    /// executor (the key, the presigned write and the read grant of each). `None` without the
-    /// switch, where no run is prepared.
-    pub task: Option<TaskFlags>,
-    /// `--task-secret-file` with `--task-out-mode put-dir` and none of the flags of a presigned
-    /// run: the frontend prepares put-directory runs alone. `None` otherwise, and then at most
-    /// one of this and `task` is set.
+    /// executor (the put directory and the input closure of each). `None` without the switch,
+    /// where no run is prepared.
     pub put_dir: Option<PutDirFlags>,
     /// `--task-janitor-key-file` and its companions: the sweep of the task packs under `cas/b/`
     /// that nothing recorded. `None` without the key file, where nothing is swept.
@@ -359,23 +355,15 @@ pub fn parse(m: &ArgMatches) -> Result<FrontendFlags, clap::Error> {
         Some(storage) => transport(storage, tls.is_some()).map_err(refuse)?,
         None => stored::without_storage(&server, &executor, packs.as_ref()).map_err(refuse)?,
     }
-    if let Some(why) = task_flags::missing_presign_flags(m) {
-        return Err(command().error(clap::error::ErrorKind::MissingRequiredArgument, why));
-    }
-    let task = task_flags::from_matches(m).map_err(refuse)?;
-    let put_dir = task_flags::put_dir_from_matches(m).map_err(refuse)?;
+    let put_dir = task_flags::from_matches(m).map_err(refuse)?;
     let janitor = janitor::from_matches(m);
     janitor::check(janitor.as_ref(), packs.as_ref()).map_err(refuse)?;
     if let Some(js) = executor.js.as_mut() {
         let beside = executor_bind::Beside {
-            task: task.as_ref(),
             put_dir: put_dir.as_ref(),
-            job_read: job_read.as_ref(),
             packs: packs.as_ref(),
         };
-        for warning in executor_bind::check(js, &beside).map_err(refuse)? {
-            tracing::warn!("{warning}");
-        }
+        executor_bind::check(js, &beside).map_err(refuse)?;
     }
     Ok(FrontendFlags {
         server,
@@ -390,7 +378,6 @@ pub fn parse(m: &ArgMatches) -> Result<FrontendFlags, clap::Error> {
         packs,
         executor,
         job_read,
-        task,
         put_dir,
         janitor,
     })
@@ -548,10 +535,7 @@ pub struct FrontendHandle {
     pack_index: Option<Arc<dyn PackIndex>>,
     /// The packs `--pack-store-endpoint` describes, if the flag was given.
     packs: Option<Packs>,
-    /// The preparer of runs `--task-secret-file` describes, if the flag was given.
-    run_prep: Option<Arc<RunPrep>>,
-    /// The preparer of put-directory runs alone `--task-secret-file` with
-    /// `--task-out-mode put-dir` describes, when none of the flags of a presigned run is given.
+    /// The preparer of the runs `--task-secret-file` describes, if the flag was given.
     put_dir_prep: Option<Arc<PutDirPrep>>,
     /// The count of intake polls the farm has run to the end ([`Farm::intake_polls`]).
     intake_polls: tokio::sync::watch::Receiver<u64>,
@@ -589,16 +573,9 @@ impl FrontendHandle {
         self.pack_index.clone()
     }
 
-    /// The preparer of the runs of a host executor `--task-secret-file` describes, or `None`
-    /// without the flag: the executor asks it for the key, the presigned write and the read grant
-    /// of each run ([`RunPrep::prepare_run`]).
-    #[must_use]
-    pub fn run_prep(&self) -> Option<Arc<RunPrep>> {
-        self.run_prep.clone()
-    }
-
-    /// The preparer of put-directory runs alone, when `--task-secret-file` is given with
-    /// `--task-out-mode put-dir` and none of the flags of a presigned run; `None` otherwise.
+    /// The preparer of the runs of a host executor, when `--task-secret-file` is given: the
+    /// executor asks it for the put directory and the input closure of each run; `None`
+    /// otherwise.
     #[must_use]
     pub fn put_dir_prep(&self) -> Option<Arc<PutDirPrep>> {
         self.put_dir_prep.clone()
@@ -733,8 +710,8 @@ where
 }
 
 /// [`start_frontend`] with the preparation of runs given to `--executor js-agent` instead of the
-/// frontend's own ([`RunSource`]): the key mint and the preparation of a run's write and read
-/// grant, for a test that prepares them its own way. A frontend of `--executor kbf-daemon`
+/// frontend's own ([`RunSource`]): the key mint and the preparation of a run's put directory, for
+/// a test that prepares them its own way. A frontend of `--executor kbf-daemon`
 /// takes none and ignores it.
 ///
 /// # Errors
@@ -949,7 +926,6 @@ impl<'a> Prepared<'a> {
                 Backend::remote_over(storage.clone(), packs.clone())
             }
         };
-        let run_prep = task_flags::open(flags.task.as_ref(), &backend)?;
         let put_dir_prep = task_flags::open_put_dir(flags.put_dir.as_ref(), &backend)?;
         // A failed run's logs are read from the storage node, under a budget of this
         // frontend's own: it serves no blob route to share one with.
@@ -977,7 +953,6 @@ impl<'a> Prepared<'a> {
         let farm = Arc::new(farm.with_state(state)?);
         log_state(durable, farm.term(), farm.lease_epoch());
         let source = source
-            .or_else(|| run_prep.as_ref().map(RunSource::of))
             .or_else(|| put_dir_prep.as_ref().map(RunSource::of_put_dir));
         let executor = executor_of(flags, &farm, packs.as_ref(), &backend, source, timeout)?;
         let checks = match &plane {
@@ -1359,7 +1334,6 @@ impl<'a> Prepared<'a> {
             },
             pack_index,
             packs,
-            run_prep,
             put_dir_prep,
             intake_polls,
             janitor_sweeps,

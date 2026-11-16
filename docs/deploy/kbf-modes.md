@@ -232,21 +232,13 @@ process that made it: a frontend that starts and finds live jobs of another proc
 id watches for a new one for the fence time and a step (40.5 s by default) before it cancels them,
 and stops if a new one appears; it cancels them if none does, as after a crash. Nothing is
 submitted meanwhile. A restart of the frontend fails the builds in flight, and stopping it cancels
-the jobs. The executor prepares each job with the frontend's **task runs** (below) and its
-job-facing read listener (`--job-listen`: the frontend's own listener, not an executor mode
-and not the jobscheduler's job service, whose lease server has a flag of the same name; moving the
-executor onto that service is [job-service-cutover.md](job-service-cutover.md)), so
-`--executor js-agent` is refused when the flags are read unless `--task-secret-file` (with the four flags it needs), `--job-listen` (with its
-companions) and `--pack-store-endpoint` are given, and unless they agree with it: the tier store
-and the read url must be IP addresses (the job network has no DNS); `--task-put-bucket` must be
-`--pack-store-bucket`, the bucket the pack is read from; an `http://` `--task-put-endpoint` needs
-`--executor-allow-plain-http-put` (with an `https://` one the flag is only warned about); an
-`http://` `--task-read-url` needs `--executor-allow-plain-http-grant` (the same, with the read
-grant: the task tool is then given `--allow-plain-http-grant`, and the read token crosses the job
-network in clear); and the longest job (`--executor-max-run-secs` plus
-`--executor-run-margin-secs`) must fit 14400 s less `--task-url-slack-secs`, the longest a
-presigned write may be good for once the slack is added. The job's wall limit is the action's
-timeout plus the margin, and `--task-run-wall-secs` is not used by the executor. A job that
+the jobs. The executor prepares each job with the frontend's **task runs** (below), so
+`--executor js-agent` is refused when the flags are read unless `--task-secret-file` (with
+`--task-out-root`) and `--pack-store-endpoint` are given, and unless they agree with it: the
+longest job (`--executor-max-run-secs` plus `--executor-run-margin-secs`) must fit 14400 s less
+`--task-url-slack-secs`, the longest the keys of a put directory may be good for once the slack is
+added. The job has no network and reads no grant, so no read listener (`--job-listen`) is needed.
+The job's wall limit is the action's timeout plus the margin. A job that
 cannot be prepared because an input blob is missing, malformed or over the closure budget ends as
 an invalid argument to its caller and is not rerun; one that cannot be prepared because the store
 cannot be read is rerun. `--executor-base-image` and `--executor-kbf-image`
@@ -254,7 +246,7 @@ cannot be read is rerun. `--executor-base-image` and `--executor-kbf-image`
 `--executor-default-image`, `--executor-images-have-no-entrypoint`, `--executor-task-tool` and
 `--executor-root-der`: a missing or tag-named image, or the same image twice, is refused when the
 flags are read. The farm's certificate authority for the task's `https` reads must be in the kbf
-image. The presigned write and the read token are never part of an error, a log line or a
+image. A secret is never part of an error, a log line or a
 metric. `GET /metrics` gains the `kbf_executor_*` families, among them the jobs submitted, those
 submitted again after a lost answer, those cancelled, those of an earlier process cancelled at
 start, and the jobs seen on a host that missed its grace. The remaining settings are
@@ -439,68 +431,42 @@ logged and sent in every heartbeat the same way. The flags are refused with `--p
 daemon starts as before.
 
 **Task runs** (off by default; the `[task-runs]` table of `kbf.toml`). With `--task-secret-file`
-the frontend prepares the runs of a host executor: for each lease and Action it makes the three
-values a task needs and the executor delivers, `RunInputs` of `kbf_front::prepare_run`. They are
-the keys the task may write, N pack keys (`cas/b/<lease>/<nonce>-<k>`, `k` from 0; pack 0 holds the
-manifest and its key is the one a one-pack caller reads) and M large-object keys
-(`cas/b/<lease>/<nonce>-L<i>`), which the executor passes to `ingest` when the run ends; a presigned
-`PUT` of exactly each key to the tier store, signed with a presign-only key (the URL takes a `PUT`
-until it expires, and the store is create-only, so the first write is the only one that lands): a pack
-URL with the key of `--task-put-credentials-file`, a large-object URL with the key of
-`--task-large-credentials-file`; and a read grant, a bearer token with the base URL of the job-facing read
-listener, for the Action, its Command and every blob of its input tree (the job-facing read listener, kbf#1943, works
-the scope out again from the Action each time the token is used, so a blob removed after the run was prepared
-fails that read). The write and the grant
-are good for the run's wall limit plus a slack, `--task-run-wall-secs` (default 7200) and
-`--task-url-slack-secs` (default 600), and never for more than 4 hours (14400 seconds), the
-ceiling of a presigned write: the tier store's presigning key must allow at least that
-(`max_expires_secs` of its `--presign-key-file`, and `--presign-max-expires`), and a wall and
-slack that add up to more are refused at start. Before it signs anything the frontend reads the
-Action, its Command and the whole input tree and checks that every blob is held: a blob that is
-missing is an error, never a smaller grant, and a tree over `--task-closure-max-digests`
-(default 500000) or `--task-closure-max-bytes` (default 32 GiB) is refused. N and M are ceilings, not predictions (the sizes of a run's outputs are not known before it runs, and
-a key a task does not write is never used): `--task-max-packs` (default 8, 1 to 8) and
-`--task-max-large` (default 8, 0 to 8). An output blob over 64 MiB is a large object, written whole
-to one large key; without `--task-large-credentials-file` (same form and mode rules as
-`--task-put-credentials-file`, a key whose prefix allows objects up to `--task-large-max-bytes`) M is
-0 whatever `--task-max-large` says, and such an output fails its task. `--task-large-max-bytes`
-(default 536870912, 512 MiB) is the cap of one large object and must be above 67108864; a value at or
-under it is refused at parse time. Every URL of a run has the same expiry. The switch needs
-`--task-put-endpoint` (the tier store's proxy, `http://` or `https://host:port`),
-`--task-put-bucket`, `--task-put-region` (default `us-east-1`),
-`--task-put-credentials-file` (JSON `{"access_key_id": "...", "secret_access_key": "..."}` of
-the presign-only key, owned by the server's user, mode 0600 or 0400) and `--task-read-url`
-(`https://host:port`, no path: an `http://` URL is refused at start, as the token is a bearer
-secret, unless `--executor-allow-plain-http-grant` is given with `--executor js-agent`). The secret file holds one secret of at least 32 bytes, owned by the server's user
-and readable by it alone; the pack-key mint and the grant key are made from it, and the
-job-facing listener must verify grants with the same secret. No secret is a flag. Left out, no
-secret file is read and the frontend serves exactly as before.
-
-**Where a task's outputs go** (`--task-out-mode`, default `presigned`; the `[task-runs]` table).
-`presigned` is the runs above. `put-dir` (docs/design/jobs-on-jobscheduler-and-tierstore.md) needs
-`--task-out-root`, the tier store's put directory on every host (`<mp>/put`, an absolute path; the
-action trees are under `<mp>/trees` beside it), and `--task-secret-file` (the mint is the secret's).
-The presigned writes and the grant are not used, so the tier store's write endpoint, bucket and
-credentials, the read url and the read listener are not needed: `--task-put-endpoint`,
-`--task-put-bucket`, `--task-put-credentials-file` and `--task-read-url` come all or none (given,
-they are checked as before), and `--job-listen` is not required. For each run the frontend
-collects the input closure, writes the action tree over the published kbf base tree, and mints one
-put directory, `cas/b/<lease>/<nonce>` (its nonce a MAC over the lease, the action and the minute).
-The job has no image: its root is the one read-only layer `<mp>/trees/<digest>`, it runs
+(and `--task-out-root`, the tier store's put directory on every host, `<mp>/put`, an absolute path;
+the action trees are under `<mp>/trees` beside it) the frontend prepares the runs of a host
+executor (docs/design/jobs-on-jobscheduler-and-tierstore.md). For each lease and Action it reads
+the Action, its Command and the whole input tree and checks that every blob is held (a blob that is
+missing is an error, never a smaller tree, and a tree over `--task-closure-max-digests`, default
+500000, or `--task-closure-max-bytes`, default 32 GiB, is refused), writes the action tree over the
+published kbf base tree, and mints one put directory, `cas/b/<lease>/<nonce>` (its nonce a MAC over
+the lease, the action and the minute). The directory's keys are good for the run's wall limit plus
+`--task-url-slack-secs` (default 600), and never for more than 4 hours (14400 seconds). The job has
+no image: its root is the one read-only layer `<mp>/trees/<digest>`, it runs
 `/.kbf-tools/kbf-task --tree --stage-and-commit --out-dir /out`, the directory
 `<mp>/put/cas/b/<lease>/<nonce>` is mounted read-write and `no_exec` at `/out`, and it has no
 network, no file and no secret, whatever `--executor-network` says. The host's agent must list
-`<mp>/put` as a `--mount-root` (read-write) and `<mp>/trees` as a mount root. The task commits
-`pack`, `pack1` to `pack7` and `L0` to `L7` there; the ingest reads `pack`'s footer and manifest,
-the other packs' footers and each large object's length, refuses an output path the Command does
-not declare, streams each large object into the CAS, and records each pack's footer in the pack
-index without reading its records (the first location recorded for a digest is kept, and a read
-of a record that does not hash to its digest drops that location). An input root that holds
-`.kbf-out` at its top is refused, and a `whole_machine` action cannot run in this mode (the job
-service gives a whole-host job no mount).
+`<mp>/put` as a `--mount-root` (read-write) and `<mp>/trees` as a mount root. The task commits one
+object, `pack` (the one-pass object, `--task-out-format one-pass`, the only value); the ingest
+reads its trailer and manifest, refuses an output path the Command does not declare, streams each
+large blob into the CAS, and records the object's index in the pack index without reading its
+records (the first location recorded for a digest is kept, and a read of a record that does not
+hash to its digest drops that location). The ingest still reads the packs and large objects a
+task of an earlier release committed. The secret file holds one secret of at least 32 bytes,
+owned by the server's user and readable by it alone; the mint is made from it, and the job-facing
+listener (if one is served) must verify grants with the same secret. No secret is a flag. Left
+out, no secret file is read and the frontend serves exactly as before.
 
-`--task-out-format` (`one-pass`, the only value and the default; ignored with the presigned
-mode) says what the task writes (docs/design/one-pass-task-object.md). The task commits `pack`
+**Where a task's outputs go** (`--task-out-mode`, `put-dir`, the only value and the default; the
+`[task-runs]` table). The `presigned` mode of the releases before, a presigned write of each pack
+to the tier store and a read grant for the inputs, was removed: `--task-out-mode presigned` is
+refused at start, naming this release, and so is each key only it read (`task-put-endpoint`,
+`task-put-bucket`, `task-put-region`, `task-put-credentials-file`, `task-read-url`,
+`task-run-wall-secs`, `task-max-packs`, `task-max-large`, `task-large-credentials-file` and
+`task-large-max-bytes`), so a `kbf.toml` that still sets one is changed before the binary is
+(the farm's config of komira-ai/komira-internal drops them in the same change that updates the pin).
+An input root that holds `.kbf-out` at its top is refused, and a `whole_machine` action cannot run
+in this mode (the job service gives a whole-host job no mount).
+
+`--task-out-format` (`one-pass`, the only value and the default) says what the task writes (docs/design/one-pass-task-object.md). The task commits `pack`
 alone, one object whose manifest and index are at its end, read once from the outputs, with no cap
 on its length or on a blob (a blob over the record cap is a record of the object, found by its
 index row and read by range; a frontend whose reads of a large blob go to the storage nodes copies
@@ -630,12 +596,7 @@ two more flags that have defaults:
   routes and the same bounds, and every request still needs a valid read grant, checked as over
   TLS; what changes is that the grant and the blobs cross the network unencrypted. Given with `--job-tls-cert` or
   `--job-tls-key` it is refused when the flags are read (which of the two to serve is not a
-  guess to make); there are no IP-name checks and no TLS reload series in this mode. The
-  executor must agree, and `--executor js-agent` refuses at the flags when it does not:
-  `--task-read-url` is `http://host:port` with `--executor-allow-plain-http-grant` (the
-  executor then gives the task tool its `--allow-plain-http-grant`), and an `https://` read url
-  goes with a TLS listener. The other two pairs, `http://` against TLS and `https://` against
-  plain, are refused, since every read would fail.
+  guess to make); there are no IP-name checks and no TLS reload series in this mode.
 - `--job-grant-secret-file`: the farm secret the grants are signed with (at least 32 bytes, mode
   0600 or 0400, owned by the server's user; surrounding whitespace is dropped). Every frontend
   of the farm, and whatever issues the grants, reads the same secret, so a grant is verified by

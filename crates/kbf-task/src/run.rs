@@ -48,7 +48,7 @@ use kbf_proto::reapi::Command;
 use tokio::fs;
 use tokio::process::Command as Process;
 
-use crate::fetch;
+use crate::message;
 use crate::network::{self, Layers, Network};
 use crate::sandbox::{self, Sandbox};
 
@@ -147,9 +147,9 @@ pub struct Run<'a> {
     /// Whether the program may use the network; [`Network::Denied`] unless the action asked
     /// ([`network::from_platform`]).
     pub network: Network,
-    /// Files holding a credential or a presigned URL this tool was given (the grant token file,
-    /// the PUT URL files). On macOS the Command's sandbox profile denies reading each; on Linux
-    /// the list is not used: the directory the job's host writes them to is one of `hidden`.
+    /// Files holding a credential this tool was given. On macOS the Command's sandbox profile
+    /// denies reading each; on Linux the list is not used: the directory the job's host writes
+    /// them to is one of `hidden`. The task tool, which is given none, passes none.
     pub unreadable: &'a [PathBuf],
     /// Directories the Command must not see (Linux): each that exists is covered by an empty
     /// read-only tmpfs in its mount namespace ([`sandbox`]); `root` and `private` stay visible at
@@ -578,9 +578,9 @@ pub(crate) fn output_paths(command: &Command) -> Vec<&String> {
 }
 
 /// A path the Command names must be empty (the directory itself) or relative, of non-empty
-/// components other than `.` and `..`: the rule of [`fetch::check_relative`].
+/// components other than `.` and `..`: the rule of [`message::check_relative`].
 fn check_relative(what: &str, path: &str) -> Result<(), RunError> {
-    fetch::check_relative(what, path).map_err(|e| RunError::Invalid(e.to_string()))
+    message::check_relative(what, path).map_err(|e| RunError::Invalid(e.to_string()))
 }
 
 /// Creates `base/relative` and each directory on the way that does not exist yet. A component

@@ -104,7 +104,7 @@ async fn a_refused_commit_is_exit_13_though_the_command_succeeded() {
             Some(ext) if ext == "part" => std::fs::rename(from, to),
             _ => Err(std::io::Error::from_raw_os_error(libc::EEXIST)),
         });
-    let failure = execute_out_dir(&out_cli(&dir, &digest, &out), &dir, &sink, &Limits::real())
+    let failure = execute_out_dir(&out_cli(&dir, &digest, &out), &dir, &sink)
         .await
         .expect_err("refused");
     assert_eq!(failure.exit_code(), EXIT_PUT);
@@ -143,45 +143,14 @@ fn a_tree_job_with_stage_and_commit_hides_nothing_either() {
     assert!(inputs.hidden.is_empty());
 }
 
-/// Asserts the flags: `--stage-and-commit` stands in for a pack URL, `--out-dir` defaults to
-/// `/out`; it needs `--tree`, and it is refused with a pack URL, a key set or
-/// `--allow-plain-http-put`; `--out-dir` needs `--stage-and-commit`.
+/// Asserts the flags: `--out-dir` defaults to `/out` and takes a directory.
 #[test]
-fn stage_and_commit_needs_a_tree_and_no_url_and_out_dir_needs_it() {
+fn out_dir_defaults_to_out() {
     let (dir, digest) = copy_tree("out-dir-flags");
     let cli = flags(&dir, &digest, &["--stage-and-commit"]).expect("flags");
-    assert!(cli.stage_and_commit);
     assert_eq!(cli.out_dir(), Path::new("/out"));
-
-    let conflicts = [
-        NO_URL,
-        "--put-urls-file=/nonexistent",
-        "--allow-plain-http-put",
-    ];
-    for flag in conflicts {
-        let error = flags(&dir, &digest, &["--stage-and-commit", flag])
-            .err()
-            .expect(flag);
-        assert_eq!(error.kind(), ClapKind::ArgumentConflict, "{flag}");
-    }
-    for flag in [NO_URL, "--put-urls-file=/nonexistent"] {
-        let error = flags(&dir, &digest, &[flag, "--out-dir=/elsewhere"])
-            .err()
-            .expect(flag);
-        assert_eq!(error.kind(), ClapKind::ArgumentConflict, "{flag}");
-    }
-    let action = format!("--action={digest}");
-    let without_tree = |extra: &[&str]| {
-        let mut args = vec!["kbf-task", "--stage-and-commit", "--lease=lease-1", &action];
-        args.extend_from_slice(extra);
-        Cli::try_parse_from(args).err().expect("no --tree")
-    };
-    assert_eq!(without_tree(&[]).kind(), ClapKind::MissingRequiredArgument);
-    let grant = [
-        "--grant-url=https://grant.example",
-        "--grant-token-file=/nonexistent",
-    ];
-    assert_eq!(without_tree(&grant).kind(), ClapKind::ArgumentConflict);
+    let cli = flags(&dir, &digest, &["--stage-and-commit", "--out-dir=/elsewhere"]).expect("flags");
+    assert_eq!(cli.out_dir(), Path::new("/elsewhere"));
 }
 
 /// Asserts that the command line `kbf-server`'s executor gives a put-directory job (its
@@ -225,7 +194,7 @@ fn one_pass_cli(root: &Path, action: &Digest, out: &Path) -> Cli {
 
 /// The manifest and the entries of the one-pass object `object`, each record checked against
 /// its entry's CRC and digest.
-fn read_one_pass(object: &[u8]) -> (TaskManifest, Vec<kbf_task_pack::one_pass::Entry>) {
+pub(super) fn read_one_pass(object: &[u8]) -> (TaskManifest, Vec<kbf_task_pack::one_pass::Entry>) {
     let (manifest, entries, _) = read_one_pass_files(object);
     (manifest, entries)
 }
@@ -304,18 +273,23 @@ async fn without_the_object_format_flag_the_object_is_the_one_pass_object() {
     }
 }
 
-/// Asserts that `--object-format` is refused without `--stage-and-commit`, and that `one-pass`
-/// is its only value: `packs`, which an earlier release took, is refused like any other.
+/// Asserts that `one-pass` is the only value of `--object-format`: `packs`, which an earlier
+/// release took, is refused like any other.
 #[test]
-fn the_object_format_flag_needs_the_put_directory() {
+fn one_pass_is_the_only_object_format() {
     let action = format!("--action={}/12", "ab".repeat(32));
-    let base = ["kbf-task", "--tree", "--lease=lease-1", &action];
+    let base = [
+        "kbf-task",
+        "--tree",
+        "--stage-and-commit",
+        "--lease=lease-1",
+        &action,
+    ];
     let mut args = base.to_vec();
-    args.extend(["--pack-url-file=/x", "--object-format=one-pass"]);
-    let error = Cli::try_parse_from(args).err().expect("refused");
-    assert_eq!(error.kind(), ClapKind::ArgumentConflict);
+    args.push("--object-format=one-pass");
+    assert!(Cli::try_parse_from(args).is_ok());
     let mut args = base.to_vec();
-    args.extend(["--stage-and-commit", "--object-format=packs"]);
+    args.push("--object-format=packs");
     let error = Cli::try_parse_from(args).err().expect("refused");
     assert_eq!(error.kind(), ClapKind::InvalidValue);
 }
@@ -438,14 +412,9 @@ async fn a_one_pass_object_that_cannot_be_written_or_committed_is_exit_13_and_le
                 _ => Err(std::io::Error::from_raw_os_error(libc::EEXIST)),
             }),
         };
-        let failure = execute_out_dir(
-            &one_pass_cli(&dir, &digest, &out),
-            &dir,
-            &sink,
-            &Limits::real(),
-        )
-        .await
-        .expect_err(what);
+        let failure = execute_out_dir(&one_pass_cli(&dir, &digest, &out), &dir, &sink)
+            .await
+            .expect_err(what);
         assert_eq!(failure.exit_code(), EXIT_PUT, "{what}: {failure}");
         assert!(names(&out).is_empty(), "{what}: {:?}", names(&out));
     }

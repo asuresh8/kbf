@@ -446,7 +446,7 @@ connection life, and the drain's GOAWAY (step 3) tells a client to reconnect for
 | `--executor-sweep-secs` | 300 | Rowless-job sweep interval (4.3.7). |
 | `--history-credentials-file` | none | PR 2. |
 
-The renewal rides the executor's existing heartbeat (`--executor-heartbeat`, 5 s): one more transaction per beat, written by the
+The renewal rides the executor's existing heartbeat (`--executor-heartbeat`, 1 s): one more transaction per beat, written by the
 step that already beats, so a stalled step stops beating (and its row expires) exactly when its farm heartbeat would stop.
 
 ### 7.2 Budget per operation
@@ -461,7 +461,7 @@ on the NUC against the real Postgres and this table is edited to say measured, o
 | Submit, poll, cancel | none | unchanged | Yes |
 | End: ingest, report | none | unchanged | Yes |
 | End: row delete | 1 transaction after the farm's ack | n/a | **No**: the client is answered first |
-| Liveness renewal | 1 transaction per executor heartbeat per frontend (0.2 per second) | ≤ 20 ms, off the action path | No |
+| Liveness renewal | 1 transaction per executor heartbeat per frontend (1 per second) | ≤ 20 ms, off the action path | No |
 | Adoption scan | 1 prefix scan of `exec/w/` per poll (rows: workers of all live frontends, ≤ tens) | ≤ 20 ms | No |
 | Crash to adoption complete | `executor-live-secs` + `adopt_poll` + claim + registration | ≈ 51 s [I]; must be < 85 s | n/a (the job runs on meanwhile) |
 | Graceful update | none: A finishes its own jobs | the longest open execution | n/a |

@@ -1315,4 +1315,23 @@ mod tests {
             );
         }
     }
+
+    /// Catches a stage of a refused start that says nothing, or the words of two stages swapped:
+    /// each names the process that could not start what it was to.
+    #[test]
+    fn each_stage_of_a_refused_start_names_its_process() {
+        let said: Vec<String> = [Stage::Relay, Stage::Init, Stage::InitSetup, Stage::Command]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "the relay",
+                "the sandbox's first process",
+                "the sandbox's first process (its setup)",
+                "the Command",
+            ]
+        );
+    }
 }

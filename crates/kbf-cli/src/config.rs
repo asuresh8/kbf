@@ -289,6 +289,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "task-put-credentials-file",
             "task-put-endpoint",
             "task-put-region",
+            "task-put-retry-secs",
             "task-read-url",
             "task-run-wall-secs",
             "task-secret-file",

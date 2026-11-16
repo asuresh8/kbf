@@ -59,6 +59,7 @@ fn the_task_flags_are_off_unless_the_secret_file_is_given() {
         "--task-put-region=eu-west-1",
         "--task-run-wall-secs=60",
         "--task-url-slack-secs=5",
+        "--task-put-retry-secs=90",
         "--task-closure-max-digests=10",
         "--task-closure-max-bytes=1024",
         "--task-max-packs=2",
@@ -107,6 +108,7 @@ fn the_flags_make_the_setting_and_the_defaults_are_the_constants() {
     assert_eq!(set.put_region, DEFAULT_REGION);
     assert_eq!(set.run_wall, Duration::from_secs(DEFAULT_RUN_WALL_SECS));
     assert_eq!(set.url_slack, Duration::from_secs(DEFAULT_URL_SLACK_SECS));
+    assert_eq!(set.put_retry, Duration::from_secs(DEFAULT_PUT_RETRY_SECS));
     assert_eq!(set.max_digests, ClosureLimits::DEFAULT.max_digests);
     assert_eq!(set.max_bytes, ClosureLimits::DEFAULT.max_bytes);
     assert_eq!(set.max_packs, 8);
@@ -120,6 +122,7 @@ fn the_flags_make_the_setting_and_the_defaults_are_the_constants() {
         "--task-put-region=eu-west-1",
         "--task-run-wall-secs=3600",
         "--task-url-slack-secs=0",
+        "--task-put-retry-secs=0",
         "--task-closure-max-digests=1000",
         "--task-closure-max-bytes=1048576",
         "--task-max-packs=3",
@@ -131,6 +134,7 @@ fn the_flags_make_the_setting_and_the_defaults_are_the_constants() {
     assert_eq!(set.put_region, "eu-west-1");
     assert_eq!(set.run_wall, Duration::from_secs(3_600));
     assert_eq!(set.url_slack, Duration::ZERO);
+    assert_eq!(set.put_retry, Duration::ZERO);
     assert_eq!(set.max_digests, 1_000);
     assert_eq!(set.max_bytes, 1 << 20);
     assert_eq!(set.max_packs, 3);
@@ -244,6 +248,7 @@ fn flags(dir: &Path) -> TaskFlags {
         allow_plain_http_grant: false,
         run_wall: Duration::from_secs(DEFAULT_RUN_WALL_SECS),
         url_slack: Duration::from_secs(DEFAULT_URL_SLACK_SECS),
+        put_retry: Duration::from_secs(DEFAULT_PUT_RETRY_SECS),
         max_digests: ClosureLimits::DEFAULT.max_digests,
         max_object_entries: 1 << 20,
         max_object_manifest_bytes: 4 << 20,
@@ -664,11 +669,13 @@ fn a_put_dir_needs_only_the_secret_file_and_the_root() {
     assert_eq!(set.secret_file, PathBuf::from("/etc/kbf/task.secret"));
     assert_eq!(set.roots, PutDirRoots::new("/mnt/ts/put").expect("roots"));
     assert_eq!(set.url_slack, Duration::from_secs(DEFAULT_URL_SLACK_SECS));
+    assert_eq!(set.put_retry, Duration::from_secs(DEFAULT_PUT_RETRY_SECS));
     assert_eq!(set.max_digests, ClosureLimits::DEFAULT.max_digests);
     assert_eq!(set.max_bytes, ClosureLimits::DEFAULT.max_bytes);
     let mut given = PUT_DIR_ONLY.to_vec();
     given.extend([
         "--task-url-slack-secs=5",
+        "--task-put-retry-secs=90",
         "--task-closure-max-digests=10",
         "--task-closure-max-bytes=1024",
     ]);
@@ -681,6 +688,7 @@ fn a_put_dir_needs_only_the_secret_file_and_the_root() {
     .put_dir
     .expect("put-dir flags");
     assert_eq!(set.url_slack, Duration::from_secs(5));
+    assert_eq!(set.put_retry, Duration::from_secs(90));
     assert_eq!((set.max_digests, set.max_bytes), (10, 1024));
 }
 
@@ -732,6 +740,7 @@ fn put_dir_flags(dir: &Path) -> PutDirFlags {
         secret_file: file(dir, "task.secret", &format!("{SECRET}\n"), 0o600),
         roots: PutDirRoots::new("/mnt/ts/put").expect("roots"),
         url_slack: Duration::from_secs(DEFAULT_URL_SLACK_SECS),
+        put_retry: Duration::from_secs(DEFAULT_PUT_RETRY_SECS),
         max_digests: ClosureLimits::DEFAULT.max_digests,
         max_object_entries: 1 << 20,
         max_object_manifest_bytes: 4 << 20,

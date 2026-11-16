@@ -104,6 +104,7 @@ pub(super) fn check(js: &mut JsAgentFlags, beside: &Beside<'_>) -> Result<Vec<St
     }
     let mut warnings = Vec::new();
 
+    js.put_retry = task.put_retry;
     let config = &mut js.config;
     config.task_out = task.out.clone();
     config.max_object_entries = task.max_object_entries;
@@ -164,6 +165,7 @@ pub(super) fn check(js: &mut JsAgentFlags, beside: &Beside<'_>) -> Result<Vec<St
 /// The put-directory case of [`check`]: the roots, and the wall that fits the ceiling of the
 /// directory's keys. Nothing is left to warn about.
 fn check_put_dir(js: &mut JsAgentFlags, put_dir: &PutDirFlags) -> Result<Vec<String>, String> {
+    js.put_retry = put_dir.put_retry;
     let config = &mut js.config;
     config.task_out = TaskOut::PutDir(put_dir.roots.clone());
     config.max_object_entries = put_dir.max_object_entries;

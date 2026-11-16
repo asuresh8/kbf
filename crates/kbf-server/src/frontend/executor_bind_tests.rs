@@ -426,9 +426,34 @@ fn a_put_dir_frontend_needs_only_the_secret_file_of_the_task_flags() {
     let roots = PutDirRoots::new("/mnt/ts/put").expect("roots");
     assert_eq!(put_dir.roots, roots);
     assert_eq!(put_dir.url_slack, Duration::from_secs(600));
-    let config = flags.executor.js.expect("js-agent").config;
-    assert_eq!(config.task_out, TaskOut::PutDir(roots));
-    assert_eq!(config.presign_ceiling, Duration::from_secs(14_400 - 600));
+    let js = flags.executor.js.expect("js-agent");
+    assert_eq!(js.put_retry, Duration::from_secs(60));
+    assert_eq!(js.config.task_out, TaskOut::PutDir(roots));
+    assert_eq!(js.config.presign_ceiling, Duration::from_secs(14_400 - 600));
+}
+
+/// Asserts that `--task-put-retry-secs` reaches the executor's flags, from the put-directory
+/// flags alone and from the full task flags, and is 60 s by default. Catches: a flag that parses
+/// and is dropped, leaving the writer of action trees at its own default.
+#[test]
+fn the_put_retry_total_reaches_the_executor() {
+    let mut more = PUT_DIR.to_vec();
+    more.push("--task-put-retry-secs=7");
+    let flags = parsed(argv(&PUT_DIR_WITHOUT, &more)).expect("accepted");
+    assert_eq!(
+        flags.executor.js.expect("js-agent").put_retry,
+        Duration::from_secs(7)
+    );
+    let flags = parsed(argv(&[], &["--task-put-retry-secs=9"])).expect("accepted");
+    assert_eq!(
+        flags.executor.js.expect("js-agent").put_retry,
+        Duration::from_secs(9)
+    );
+    let flags = parsed(argv(&[], &[])).expect("accepted");
+    assert_eq!(
+        flags.executor.js.expect("js-agent").put_retry,
+        Duration::from_secs(60)
+    );
 }
 
 /// Asserts that the longest run must still fit the ceiling of a directory's keys, named as for

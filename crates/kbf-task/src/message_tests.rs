@@ -56,7 +56,7 @@ fn a_file_that_is_not_the_blob_is_a_mismatch_naming_the_file() {
     let cases = [
         ([bytes.as_slice(), b"\0"].concat(), "it is longer than"),
         (bytes[..bytes.len() - 1].to_vec(), "it has"),
-        (b"salt of another action".to_vec(), "its SHA-256 is"),
+        (bytes.iter().map(|b| b ^ 1).collect(), "its SHA-256 is"),
     ];
     for (held, why) in cases {
         std::fs::write(&path, &held).expect("rewrite");

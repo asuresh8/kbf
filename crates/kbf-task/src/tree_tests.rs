@@ -6,7 +6,7 @@ use clap::error::ErrorKind as ClapKind;
 use kbf_proto::reapi::command::EnvironmentVariable;
 use kbf_proto::reapi::{self, Directory, FileNode, Platform, platform::Property};
 use kbf_segments::sha256;
-use kbf_task_pack::{MANIFEST_VERSION, MANIFEST_VERSION_3};
+use kbf_task_pack::{MANIFEST_VERSION, MANIFEST_VERSION_2};
 use kbf_testkit::dir::TestDir;
 use kbf_types::Digest;
 use prost::Message as _;
@@ -152,7 +152,7 @@ async fn a_tree_run_reads_the_action_and_command_from_kbf_and_fetches_nothing() 
     assert_eq!(manifest.output_files[0].path, "out");
     assert_eq!(manifest.output_files[0].digest, sha256(b"hi\n"));
     assert_eq!(manifest.inputs, Some(input_stats()));
-    assert_eq!(manifest.version(), MANIFEST_VERSION_3);
+    assert_eq!(manifest.version(), MANIFEST_VERSION_2);
     assert_eq!(std::fs::read(dir.join("work/out")).expect("out"), b"hi\n");
     assert!(dir.join(".kbf-run/stdout").is_file());
     assert!(dir.join(".kbf-run/stderr").is_file());
@@ -163,6 +163,7 @@ async fn a_tree_run_reads_the_action_and_command_from_kbf_and_fetches_nothing() 
     assert_eq!(stored.exit_code, manifest.exit_code);
     assert_eq!(stored.output_files, manifest.output_files);
     assert_eq!(stored.inputs, manifest.inputs);
+    assert_eq!(stored.version(), MANIFEST_VERSION_2);
 }
 
 /// Asserts the data of the writers of version 2 against the reader of this release (kbf-task-pack's
@@ -174,9 +175,7 @@ async fn a_tree_run_reads_the_action_and_command_from_kbf_and_fetches_nothing() 
 async fn a_manifest_with_from_is_read_by_the_item_8_reader() {
     let (dir, digest) = copy_tree("from-tree");
     let (outcome, put) = run_tree(&tree_cli(&dir, &digest)).await;
-    let mut manifest = outcome.expect("task");
-    // The manifest as the writers of version 2 spelled it: the reader still reads those.
-    manifest.objects = None;
+    let manifest = outcome.expect("task");
     let json = String::from_utf8(manifest.to_json().expect("json")).expect("utf-8");
     assert!(json.ends_with(TREE_INPUTS), "{json}");
     assert!(json.starts_with(r#"{"version":2,"#), "{json}");
@@ -195,7 +194,6 @@ async fn a_manifest_without_from_is_read_by_this_release() {
     let (dir, digest) = copy_tree("no-from");
     let (outcome, _put) = run_tree(&tree_cli(&dir, &digest)).await;
     let mut manifest = outcome.expect("task");
-    manifest.objects = None;
 
     manifest.inputs = None;
     let v1 = manifest.to_json().expect("v1");

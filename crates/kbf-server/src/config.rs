@@ -244,6 +244,17 @@ pub struct Args {
         value_parser = clap::value_parser!(u64).range(1..=60_000)
     )]
     pub readyz_store_timeout_ms: u64,
+    /// How often, in milliseconds, a frontend asks each of the dependencies behind `GET
+    /// /readyz` (the storage node, the state store, the storage map) again, in the
+    /// background. `GET /readyz` and the REAPI listener's `grpc.health.v1` service answer from
+    /// the last answers at once and wait for no probe; a probe that has not answered within
+    /// `--readyz-store-timeout-ms` counts as failed.
+    #[arg(
+        long,
+        default_value_t = crate::health::PROBE_INTERVAL.as_millis() as u64,
+        value_parser = clap::value_parser!(u64).range(1..=3_600_000)
+    )]
+    pub readyz_probe_interval_ms: u64,
     /// PEM certificate of the worker listener. With `--worker-tls-key` and
     /// `--worker-client-ca` it serves mutual TLS; without all three, plain text.
     #[arg(long, requires_all = ["worker_tls_key", "worker_client_ca"])]

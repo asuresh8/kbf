@@ -114,6 +114,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "placement-predictions",
             "progress-interval-secs",
             "qos-allowed",
+            "readyz-probe-interval-ms",
             "readyz-store-timeout-ms",
             "scheduler-core",
             "state-store",

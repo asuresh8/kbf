@@ -163,6 +163,8 @@ pub(super) fn flag_list(
         format!("--executor-job-token-file={}", token.display()),
         "--executor-frontend-id=front-1".to_owned(),
         "--executor-hosts=1".to_owned(),
+        // A change in the job service shows in `/readyz` within a tick of the test's.
+        "--readyz-probe-interval-ms=20".to_owned(),
         "--executor-host-cpus=2".to_owned(),
         "--executor-host-memory-gib=16".to_owned(),
         "--executor-base-image=registry.test/base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),

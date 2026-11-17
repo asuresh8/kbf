@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tierstore::{TreeDigest, TreeError, flatten, parse_manifest};
 
 use super::encode::{self, Child};
-use super::listing::{Entry, entries_of};
+use super::listing::Listed;
 
 /// The top-level names every action tree adds or `kbf-task` makes, which a base tree must not
 /// hold: the input root ([`INPUT_ROOT`]), the Action and Command, `kbf-task`'s run directory,
@@ -56,7 +56,7 @@ pub struct BaseTree {
     pub(super) children: Vec<Child>,
     pub(super) facts: BaseFacts,
     root: TreeDigest,
-    pub(super) listing: Option<Arc<[Entry]>>,
+    pub(super) listing: Option<Arc<Listed>>,
 }
 
 impl BaseTree {
@@ -94,7 +94,7 @@ impl BaseTree {
     ) -> Result<Self, BaseTreeError> {
         let flattened = flatten(&self.root, fetch).map_err(BaseTreeError::Listing)?;
         Ok(Self {
-            listing: Some(entries_of(&flattened).into()),
+            listing: Some(Arc::new(Listed::new(flattened))),
             ..self
         })
     }

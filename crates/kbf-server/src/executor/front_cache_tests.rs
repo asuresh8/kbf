@@ -108,8 +108,8 @@ fn read_count(reads: &AtomicUsize) -> usize {
 }
 
 /// The lease of a second run of the same action.
-fn second() -> LeaseId {
-    LeaseId::new(7, 4)
+fn second() -> RunId {
+    RunId::new(OperationId(7), 4)
 }
 
 /// The objects the rig's store has been given.
@@ -118,7 +118,7 @@ fn puts(rig: &Rig) -> usize {
 }
 
 /// Mints the run of `lease` for `action` in `form` and takes its tree: its directory and tree.
-async fn run(rig: &Rig, lease: LeaseId, action: &Digest, form: InputTree) -> (PackKey, String) {
+async fn run(rig: &Rig, lease: RunId, action: &Digest, form: InputTree) -> (PackKey, String) {
     let dir = rig.front.mint(lease, action, WALL, form).await;
     let dir = dir.expect("a dir");
     let tree = rig.front.tree(lease).await.expect("a tree");
@@ -175,7 +175,13 @@ async fn a_remembered_tree_is_good_until_the_memo_time_and_then_written_again() 
     assert_eq!((prep.prepared(), prep.minted()), (1, 1));
 
     CLOCK.with(|c| c.set(NOW + ttl));
-    let (_, tree) = run(&rig, LeaseId::new(7, 5), &action, InputTree::Manifests).await;
+    let (_, tree) = run(
+        &rig,
+        RunId::new(OperationId(7), 5),
+        &action,
+        InputTree::Manifests,
+    )
+    .await;
     assert_eq!(tree, first, "the same tree, written again");
     assert_eq!((prep.prepared(), prep.minted()), (2, 1));
 }
@@ -194,9 +200,21 @@ async fn the_manifests_and_the_tree_list_of_one_action_are_two_entries() {
     assert!(listed.starts_with("cas/l/"), "{listed}");
     assert_eq!((prep.prepared(), prep.minted()), (2, 0));
 
-    let (_, again) = run(&rig, LeaseId::new(7, 5), &action, InputTree::Manifests).await;
+    let (_, again) = run(
+        &rig,
+        RunId::new(OperationId(7), 5),
+        &action,
+        InputTree::Manifests,
+    )
+    .await;
     assert_eq!(again, manifests);
-    let (_, again) = run(&rig, LeaseId::new(7, 6), &action, InputTree::Provider).await;
+    let (_, again) = run(
+        &rig,
+        RunId::new(OperationId(7), 6),
+        &action,
+        InputTree::Provider,
+    )
+    .await;
     assert_eq!(again, listed);
     assert_eq!((prep.prepared(), prep.minted()), (2, 2));
 }
@@ -235,7 +253,13 @@ async fn a_tree_that_could_not_be_written_is_not_remembered() {
 
     run(&rig, second(), &action, InputTree::Manifests).await;
     assert_eq!((prep.prepared(), prep.minted()), (4, 0));
-    run(&rig, LeaseId::new(7, 5), &action, InputTree::Manifests).await;
+    run(
+        &rig,
+        RunId::new(OperationId(7), 5),
+        &action,
+        InputTree::Manifests,
+    )
+    .await;
     assert_eq!((prep.prepared(), prep.minted()), (4, 1));
 }
 

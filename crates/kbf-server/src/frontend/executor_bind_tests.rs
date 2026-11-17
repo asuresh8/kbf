@@ -7,9 +7,9 @@ use std::time::Duration;
 use super::super::{FrontendFlags, command, parse};
 use crate::executor::PutDirRoots;
 
-/// A frontend that runs placed actions on hosts, with everything it needs and nothing it can
+/// A frontend that runs executed actions as jobs, with everything it needs and nothing it can
 /// do without: the packs, and the put directories of the runs.
-const BASE: [&str; 19] = [
+const BASE: [&str; 17] = [
     "frontend",
     "--storage=http://127.0.0.1:1",
     "--state-store=postgres:///kbf?host=/run/postgresql",
@@ -27,8 +27,6 @@ const BASE: [&str; 19] = [
     "--executor-kbf-image=registry.test/kbf@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
     "--executor-base-tree=/nowhere/base-tree",
     "--executor-base-tree-url=",
-    "--executor-host-cpus=8",
-    "--executor-host-memory-gib=32",
 ];
 
 fn flag_name(flag: &str) -> &str {

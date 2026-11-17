@@ -12,7 +12,7 @@
 //! The result is a `google.rpc.ErrorInfo` of reason [`OUTPUT_REASON`] in the details of the
 //! `Result`'s status, its metadata holding `stdout`, `stderr` and `truncated` (`true` when the
 //! service or this cap dropped any of the output), and `note` when the output could not be
-//! read. The status's code and message are what they were: the farm reads only those, logs
+//! read. The status's code and message are what they were: the frontend reads only those, logs
 //! the message, and ignores a detail it does not look for. The log line of the output holds
 //! lengths only; the end of the standard error, at most
 //! [`Config::failed_stderr_log_bytes`](super::Config::failed_stderr_log_bytes) bytes of it, is
@@ -24,8 +24,7 @@ use std::fmt;
 use js_proto::v1::{GetLogsResponse, JobResult};
 use kbf_front::ERROR_DOMAIN;
 use kbf_job_client::Error;
-use kbf_proto::google::rpc::ErrorInfo;
-use kbf_proto::worker;
+use kbf_proto::google::rpc::{self, ErrorInfo};
 use prost::Message;
 
 /// The most bytes of a job's output attached to its `Result`: standard output and standard
@@ -35,7 +34,7 @@ pub(super) const OUTPUT_CAP: usize = 8 << 10;
 /// The `ErrorInfo.reason` of a failed job's output.
 pub(super) const OUTPUT_REASON: &str = "JOB_OUTPUT_TAIL";
 
-const ERROR_INFO: &str = "type.googleapis.com/google.rpc.ErrorInfo";
+pub(super) const ERROR_INFO: &str = "type.googleapis.com/google.rpc.ErrorInfo";
 
 /// The tails of a job's two streams as the job service holds them: it
 /// formats as their lengths, never as the text.
@@ -134,10 +133,10 @@ impl Output {
 
     /// Adds this output to the details of `result`'s status, which is not OK; the code and
     /// the message stay as they are. Nothing is added when there is nothing to say.
-    pub(super) fn attach(&self, result: &mut worker::Result) {
-        let Some(status) = result.status.as_mut().filter(|_| !self.is_empty()) else {
+    pub(super) fn attach(&self, status: &mut rpc::Status) {
+        if self.is_empty() {
             return;
-        };
+        }
         let mut metadata = BTreeMap::from([
             ("stdout".to_owned(), self.stdout.clone()),
             ("stderr".to_owned(), self.stderr.clone()),

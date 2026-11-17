@@ -1,28 +1,22 @@
-//! The host executor against the real farm and an in-process job service.
+//! The executor over an in-process job service, as the frontend builds it and as the tests'
+//! seams stand for it.
 //!
-//! The farm is [`kbf_server::Farm`] on the legacy scheduler core; the job service
-//! is `kbf_job_client::fake::FakeJobServer`, which keeps the service's rules
-//! and leaves what the hosts do to the test. Time is tokio's paused clock, moved by hand: the
-//! tests assert on what happened, never on how long it took.
-//!
-//! One test binary, as `Farm` is generic and coverage counts each generic function by its
-//! best-covered instantiation.
+//! The executor is [`kbf_server::executor::Executor`]; the job service is
+//! `kbf_job_client::fake::FakeJobServer`, which keeps the service's rules and leaves what the
+//! hosts do to the test. Time is real, and the executor reads its jobs every few milliseconds:
+//! a test waits for an event, bounded, and never asserts how long anything took.
 
 mod classes;
-mod drain;
 mod driver;
 mod jobs;
 mod keys;
 mod mac;
 mod n_minus_1;
 mod phases;
-mod pool;
 mod promotion;
 mod put_dir;
+mod record;
 mod recovery;
 mod rig;
-mod shared;
 mod spec;
-mod starts;
-mod whole;
 mod wiring;

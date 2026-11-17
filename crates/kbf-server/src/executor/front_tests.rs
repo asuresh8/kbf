@@ -19,7 +19,9 @@ use kbf_proto::reapi::platform::Property;
 use kbf_proto::reapi::{self, Directory, FileNode, Platform};
 use kbf_state::ManualClock;
 use kbf_storage::Storage;
-use kbf_types::DigestFunction;
+use kbf_types::{DigestFunction, OperationId};
+
+use crate::executor::RunId;
 
 use super::*;
 
@@ -38,8 +40,8 @@ fn clock() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(CLOCK.with(Cell::get))
 }
 
-fn lease() -> LeaseId {
-    LeaseId::new(7, 3)
+fn lease() -> RunId {
+    RunId::new(OperationId(7), 3)
 }
 
 fn wire(digest: &kbf_types::Digest) -> Digest {
@@ -550,7 +552,10 @@ async fn a_pack_under_the_issued_key_becomes_the_actions_result() {
     let rig = Rig::new();
     for (exit_code, cached) in [(0, true), (3, false)] {
         let build = format!("7-{}", 10 + exit_code);
-        let lease = LeaseId::new(7, 10 + u64::try_from(exit_code).expect("small"));
+        let lease = RunId::new(
+            OperationId(7),
+            10 + u32::try_from(exit_code).expect("small"),
+        );
         let action = rig
             .action(
                 |a| a.timeout = Some(seconds(i64::from(exit_code) + 1)),
@@ -670,7 +675,7 @@ async fn a_pack_over_the_executors_caps_is_too_large() {
         max_object_manifest_bytes: 4 << 20,
         object_bytes_per_entry: 1024,
     };
-    let other = LeaseId::new(7, 4);
+    let other = RunId::new(OperationId(7), 4);
     let refused = rig.front.ingest(other, &key, &action, &capped).await;
     assert!(
         matches!(refused, Ingested::Reject(RejectReason::TooLarge)),

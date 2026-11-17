@@ -3,6 +3,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
+use crate::executor::RunId;
 use kbf_front::{Cache, CacheStorage, PackKeyMint, PackSettings, SegmentsConfig};
 use kbf_objstore::{Capabilities, MemoryStore};
 use kbf_pack::{PackKeys, WriterKind};
@@ -10,7 +11,6 @@ use kbf_pack_index::PackIndex;
 use kbf_pack_index::memory::MemoryPackIndex;
 use kbf_proto::reapi::Digest;
 use kbf_state::ManualClock;
-use kbf_types::LeaseId;
 
 use super::*;
 use crate::executor::{
@@ -63,7 +63,7 @@ fn base() -> kbf_front::action_tree::BaseTree {
 }
 
 fn flags() -> JsAgentFlags {
-    let mut config = Config::new("front-1", 1, 2_000, 16 << 30);
+    let mut config = Config::new("front-1");
     config.task_out = Some(PutDirRoots::new("/mnt/ts/put").expect("roots"));
     let image = format!("docker://registry.test/app@sha256:{}", "ab".repeat(32));
     JsAgentFlags {
@@ -115,7 +115,7 @@ async fn minted(flags: &JsAgentFlags) -> (Result<String, MintError>, usize) {
     };
     let key = front
         .mint(
-            LeaseId::new(7, 3),
+            RunId::new(kbf_types::OperationId(7), 3),
             &action,
             Duration::from_secs(60),
             InputTree::Manifests,
@@ -161,34 +161,30 @@ fn built(
         prepare: Arc::new(Refusing::default()),
     };
     let front = flags.front(packs, backend, source);
-    let farm = Arc::new(crate::Farm::new(
-        Arc::new(Cache::memory()),
-        kbf_sched::UNSERVABLE_WAIT,
-        kbf_sched::FINISHED_RETENTION,
-    ));
-    flags.build(farm, Arc::new(front), Arc::new(Metrics::default()), store)
+    flags.build(
+        Arc::new(front),
+        Arc::new(Metrics::default()),
+        store,
+        kbf_front::Recorder::off(),
+        RETENTION,
+    )
 }
 
-/// Catches a frontend that starts with shared ownership and nowhere to keep the rows: the
-/// build refuses with the message that names both flags, while single ownership builds with
-/// no store (the rows are not kept), and shared ownership builds over a store.
+/// The finished retention the tests build with.
+const RETENTION: Duration = Duration::from_secs(42);
+
+/// Catches `build` refusing a state store or the lack of one: with no store and over a store it
+/// builds; settings that break a rule of the executor are refused.
 #[tokio::test]
-async fn shared_ownership_without_a_state_store_is_refused_at_the_build() {
-    let shared = || {
-        let mut flags = flags();
-        flags.config.ownership = Ownership::Shared;
-        flags
-    };
-    let why = built(shared(), None).err().expect("refused").to_string();
-    assert_eq!(
-        why,
-        "--executor-ownership shared needs --state-store: the rows of the jobs are kept there"
-    );
+async fn build_makes_the_executor_with_or_without_a_state_store() {
     let store: Arc<dyn kbf_state::Store> = Arc::new(kbf_state::fake::Fake::with_flaw(
         Arc::new(ManualClock::default()),
         kbf_state::fake::Flaw::None,
     ));
-    assert!(built(shared(), Some(Arc::clone(&store))).is_ok());
     assert!(built(flags(), None).is_ok());
     assert!(built(flags(), Some(store)).is_ok());
+    let mut zero = flags();
+    zero.config.live = Duration::ZERO;
+    let why = built(zero, None).expect_err("refused").to_string();
+    assert!(why.contains("liveness time"), "{why}");
 }

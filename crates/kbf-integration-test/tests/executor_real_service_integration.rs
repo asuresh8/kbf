@@ -1,15 +1,15 @@
-//! The host executor of kbf-server (`kbf_server::executor::Executor`, the real one, over the
-//! real `Farm`) against the real job service and the real host agent: the `js-lease-server`
-//! and the `js-agent` of the jobscheduler release that `kbf-js-version.toml` pins
-//! (`tests/js_real_support` says how each is fetched, checked and started). The agent runs each
-//! job's container through a stand-in `crun` (`kbf_integration_test::js_stand_in`) that tells
-//! the test when it starts, with what arguments, and when it ends, and does what the test
+//! The executor of kbf-server (`kbf_server::executor::Executor`, the real one, through
+//! `kbf_front::Dispatch`) against the real job service and the real host agent: the
+//! `js-lease-server` and the `js-agent` of the jobscheduler release that `kbf-js-version.toml`
+//! pins (`tests/js_real_support` says how each is fetched, checked and started). The agent runs
+//! each job's container through a stand-in `crun` (`kbf_integration_test::js_stand_in`) that
+//! tells the test when it starts, with what arguments, and when it ends, and does what the test
 //! planned for its action: exit with a code, or hold until it is stopped.
 //!
 //! What the executor reads from the outside (the action's facts and tree, the put directory's
 //! mint, the pack's ingest) is faked here as in `kbf-server/tests/executor/rig.rs`: the
-//! subject is what the executor and the job service say to each other, and what the scheduler
-//! and the agent make of it. A fake job server can drift from the real one; these tests run the
+//! subject is what the executor and the job service say to each other, and what the service and
+//! the agent make of it. A fake job server can drift from the real one; these tests run the
 //! real one.
 //!
 //! The cases need root (the agent runs jobs only as root), systemd (each agent runs in a scope
@@ -21,22 +21,22 @@
 //! - `a_job_that_exits_0_is_the_actions_result`: success, end to end.
 //! - `a_job_past_its_wall_limit_is_a_timeout`: the agent stops a container that holds past
 //!   the wall limit, and the executor reports the action timed out.
-//! - `a_frontend_that_stops_cancels_its_running_job`: cancel.
+//! - `a_cancelled_operation_cancels_its_running_job`: `Dispatch::cancel` reaches the job
+//!   service and the host.
 //! - `a_lost_answer_to_a_submit_makes_one_job`: the answer to the submit is lost after the
 //!   service made the job; the executor submits again under the same id, and the service holds
 //!   one job.
-//! - `a_whole_machine_action_is_refused_and_no_job_is_made`: the farm gives a worker a
-//!   whole-machine action, which cannot commit into a put directory (the service gives a
-//!   whole-host job no mount), so the executor answers it as the caller's and makes no job.
-//! - `a_restarted_frontend_cancels_the_earlier_job_and_runs_the_action_again`: restart.
+//! - `a_whole_machine_action_is_refused_and_no_job_is_made`: a whole-machine action cannot
+//!   commit into a put directory (the service gives a whole-host job no mount), so the executor
+//!   answers it as the caller's and makes no job.
 //!
 //! One test runs everywhere, as a pull request's tests do:
 //! `the_stand_in_answers_as_the_program_it_is_linked_as`, the built stand-in under the names
 //! the agent runs it by.
 //!
 //! The tests wait on what happens (a container starts or ends, an action finishes, a job
-//! reaches a state), never on time. The executor and the farm are stepped at the executor's
-//! poll interval, as the frontend's driver steps them; no assertion reads a clock.
+//! reaches a state), never on time. The executor runs each operation in a task of its own; no
+//! assertion reads a clock.
 
 mod js_real_support;
 
@@ -46,24 +46,21 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_proto::v1::{Job, JobState, ListJobsRequest, ResultReason};
-use kbf_front::{Cache, Described, Dispatch as _, Finished, Stage, Submission};
+use kbf_front::{Described, Dispatch as _, Finished, Recorder, Stage, Submission};
 use kbf_job_client::Client;
 use kbf_proto::reapi::Digest;
-use kbf_sched::Request;
-use kbf_server::Farm;
 use kbf_server::executor::{
     ActionFacts, Config, Deps, Executor, Ingest, Ingested, InputTree, Inputs, InputsError, Metrics,
-    MintError, OUT_TARGET, PackKey, PutDirRoots, SizeClass, TASK_IN_TREE, UntrustedLimits,
-    build_id, job_id,
+    MintError, OUT_TARGET, PackKey, PutDirRoots, RunId, SizeClass, TASK_IN_TREE, UntrustedLimits,
+    build_id, job_id, parse_stored_name,
 };
-use kbf_types::{ActionKey, LeaseKind, Qos, Resources};
+use kbf_types::ActionKey;
 use tokio::sync::watch;
 
 use js_real_support::agent::{Event, Node, RealAgent, image};
 use js_real_support::drop_answer::DropFirstAnswer;
 use js_real_support::{RealJobServer, TOKEN};
 
-const MIB: u64 = 1 << 20;
 const FRONTEND: &str = "front-1";
 
 /// The action tree every run is told to read its root from: 64 hex digits.
@@ -109,7 +106,7 @@ impl Inputs for FakeInputs {
         })
     }
 
-    async fn tree(&self, _lease: kbf_types::LeaseId) -> Result<String, InputsError> {
+    async fn tree(&self, _run: RunId) -> Result<String, InputsError> {
         Ok(TREE.to_owned())
     }
 }
@@ -117,7 +114,7 @@ impl Inputs for FakeInputs {
 /// The frontend's read of a task's pack: every pack holds a result of exit code 0.
 #[derive(Default)]
 struct FakeIngest {
-    ingested: Mutex<Vec<kbf_types::LeaseId>>,
+    ingested: Mutex<Vec<RunId>>,
     /// The put root of the node: a run's put directory is made under it when it is minted, as
     /// the job's mount source must exist when the agent starts the job.
     put: std::path::PathBuf,
@@ -136,12 +133,12 @@ impl FakeIngest {
 impl Ingest for FakeIngest {
     async fn mint(
         &self,
-        lease: kbf_types::LeaseId,
+        run: RunId,
         _action: &Digest,
         _wall: Duration,
         _tree: InputTree,
     ) -> Result<PackKey, MintError> {
-        let key = PackKey::new(format!("cas/b/{}/0-0", build_id(lease)));
+        let key = PackKey::new(format!("cas/b/{}/0-0", build_id(run)));
         let dir = self.put.join(key.as_str());
         std::fs::create_dir_all(&dir).expect("the put directory");
         // The job's user writes into it.
@@ -151,7 +148,7 @@ impl Ingest for FakeIngest {
 
     async fn ingest(
         &self,
-        lease: kbf_types::LeaseId,
+        run: RunId,
         _key: &PackKey,
         _action: &Digest,
         _limits: &UntrustedLimits,
@@ -159,7 +156,7 @@ impl Ingest for FakeIngest {
         self.ingested
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(lease);
+            .push(run);
         Ingested::Ran {
             result: Box::default(),
             cached: false,
@@ -167,26 +164,40 @@ impl Ingest for FakeIngest {
     }
 }
 
-/// The farm's handle on one action.
+/// The executor's handle on one action: the operation it was given and where it is.
 struct Caller {
     tag: u8,
+    name: String,
     stage: watch::Receiver<Stage>,
 }
 
 impl Caller {
-    fn finished(&self) -> Option<Finished> {
-        match &*self.stage.borrow() {
-            Stage::Done(finished) => Some(finished.clone()),
-            _ => None,
+    /// Waits until the operation is answered.
+    async fn done(&self) -> Finished {
+        let mut stage = self.stage.clone();
+        let seen = stage
+            .wait_for(|stage| matches!(stage, Stage::Done(_)))
+            .await
+            .expect("the operation is answered");
+        match &*seen {
+            Stage::Done(finished) => finished.clone(),
+            other => unreachable!("waited for Done, saw {other:?}"),
+        }
+    }
+
+    /// The run of the operation's first attempt.
+    fn first_run(&self) -> RunId {
+        RunId {
+            operation: parse_stored_name(&self.name).expect("an operation name"),
+            attempt: 0,
         }
     }
 }
 
-/// The real server, an agent on a node, a farm, and the executor between them.
+/// The real server, an agent on a node, and the executor between them.
 struct Rig {
     exec: Executor,
     cfg: Config,
-    farm: Arc<Farm>,
     inputs: Arc<FakeInputs>,
     ingest: Arc<FakeIngest>,
     metrics: Arc<Metrics>,
@@ -199,8 +210,7 @@ struct Rig {
 }
 
 impl Rig {
-    /// A rig named `name`: a server, a node and its agent, a farm and an executor of one
-    /// worker.
+    /// A rig named `name`: a server, a node and its agent, and an executor over the server.
     async fn start(name: &str) -> Rig {
         let _ = tracing_subscriber::fmt()
             .with_test_writer()
@@ -210,8 +220,7 @@ impl Rig {
         let node = Node::new(name).await;
         let agent = RealAgent::start(&node, &server).await;
         let api = server.client();
-        let mut cfg = Config::new(FRONTEND, 1, 2_000, 4 << 30);
-        cfg.slots = 2;
+        let mut cfg = Config::new(FRONTEND);
         // The put directories are under the node's own mount point, a root of its agent.
         let put = node.mount_point.join("put");
         cfg.task_out = Some(PutDirRoots::new(&put.display().to_string()).expect("roots"));
@@ -219,19 +228,13 @@ impl Rig {
         std::fs::create_dir_all(node.mount_point.join("trees").join(TREE)).expect("the tree");
         // The job's wall limit is the action's timeout: no margin is added.
         cfg.run_margin = Duration::ZERO;
-        let farm = Arc::new(Farm::new(
-            Arc::new(Cache::memory()),
-            kbf_sched::UNSERVABLE_WAIT,
-            kbf_sched::FINISHED_RETENTION,
-        ));
         let inputs = Arc::new(FakeInputs::default());
         let ingest = Arc::new(FakeIngest::under(put));
         let metrics = Arc::new(Metrics::default());
-        let exec = Rig::executor(&cfg, &farm, server.client(), &inputs, &ingest, &metrics);
+        let exec = Rig::executor(&cfg, server.client(), &inputs, &ingest, &metrics);
         Rig {
             exec,
             cfg,
-            farm,
             inputs,
             ingest,
             metrics,
@@ -244,57 +247,39 @@ impl Rig {
 
     fn executor(
         cfg: &Config,
-        farm: &Arc<Farm>,
         client: Client,
         inputs: &Arc<FakeInputs>,
         ingest: &Arc<FakeIngest>,
         metrics: &Arc<Metrics>,
     ) -> Executor {
         let deps = Deps {
-            farm: Arc::clone(farm),
             client,
             ingest: ingest.clone(),
             inputs: inputs.clone(),
             metrics: Arc::clone(metrics),
             store: None,
+            recorder: Recorder::off(),
         };
         Executor::new(cfg.clone(), deps).expect("a valid config")
     }
 
-    /// The executor of a restarted frontend: the same frontend id, a process of its own, over
-    /// the same farm and job service.
-    fn restarted(&self) -> Executor {
-        let mut cfg = self.cfg.clone();
-        cfg.instance = Config::new(FRONTEND, 1, 2_000, 4 << 30).instance;
-        Rig::executor(
-            &cfg,
-            &self.farm,
-            self.server.client(),
-            &self.inputs,
-            &self.ingest,
-            &self.metrics,
-        )
+    /// Hands the action of `tag` to the executor, as the REAPI front hands an Execute.
+    fn submit(&self, tag: u8) -> Caller {
+        self.submit_as(tag, false)
     }
 
-    /// Submits the action of `tag` as a lease of `kind`, booking half a core and 256 MiB.
-    fn submit(&self, tag: u8, kind: LeaseKind) -> Caller {
-        let request = Request {
+    /// Hands the action of `tag`, which asks for the whole machine, to the executor.
+    fn submit_whole(&self, tag: u8) -> Caller {
+        self.submit_as(tag, true)
+    }
+
+    fn submit_as(&self, tag: u8, whole_machine: bool) -> Caller {
+        let submission = Submission {
             key: ActionKey {
                 instance: "main".to_owned(),
                 action: digest_of(tag),
-            }
-            .into(),
-            qos: Qos::Ci,
-            kind,
-            resources: Resources::new(500, 256 * MIB),
-            hermetic: true,
-            do_not_cache: false,
-            whole_worker: false,
-            pin: None,
-            needs: Default::default(),
-        };
-        let submission = Submission {
-            request,
+            },
+            whole_machine,
             call: None,
             described: Described {
                 arguments: vec!["/bin/run".to_owned()],
@@ -302,11 +287,11 @@ impl Rig {
                 label: Default::default(),
             },
             evidence: Default::default(),
-            max_wall: None,
         };
-        let ticket = self.farm.submit(submission).expect("the farm takes it");
+        let ticket = self.exec.submit(submission).expect("the executor takes it");
         Caller {
             tag,
+            name: ticket.name,
             stage: ticket.stage,
         }
     }
@@ -325,42 +310,21 @@ impl Rig {
             .insert(hash_of(tag), timeout);
     }
 
-    /// Steps the executor and the farm until `done` holds of the rig.
-    async fn until(&mut self, what: &str, done: impl Fn(&Rig) -> bool) {
-        let mut pace = tokio::time::interval(self.exec.poll());
-        while !done(self) {
-            turn(&mut self.exec, &self.farm, &mut pace).await;
-        }
-        eprintln!("{what}");
-    }
-
-    /// Steps the executor and the farm until a container's next event, which it returns. A
-    /// pass is never cut short: the event is looked for between passes. Fails, with the
-    /// action's result, if `caller`'s action finishes first.
-    async fn next_event(&mut self, caller: &Caller) -> Event {
-        let mut pace = tokio::time::interval(self.exec.poll());
-        loop {
-            if let Some(event) = self.node.try_next() {
+    /// Waits for a container's next event, which it returns. Fails, with the action's result,
+    /// if `caller`'s action finishes first.
+    async fn next_event(&self, caller: &Caller) -> Event {
+        tokio::select! {
+            event = self.node.next() => {
                 eprintln!("{event:?}");
-                return event;
+                event
             }
-            if let Some(finished) = caller.finished() {
-                panic!(
-                    "action {} finished before its container did: {finished:?}\n{}\nhosts:\n{}",
-                    caller.tag,
-                    self.logs(),
-                    self.server.hosts().await
-                );
-            }
-            turn(&mut self.exec, &self.farm, &mut pace).await;
+            finished = caller.done() => panic!(
+                "action {} finished before its container did: {finished:?}\n{}\nhosts:\n{}",
+                caller.tag,
+                self.logs(),
+                self.server.hosts().await
+            ),
         }
-    }
-
-    /// Steps until `caller`'s action is done.
-    async fn finish(&mut self, caller: &Caller) -> Finished {
-        let what = format!("action {} done", caller.tag);
-        self.until(&what, |_| caller.finished().is_some()).await;
-        caller.finished().expect("done")
     }
 
     /// Every job of this frontend the job service holds, in the order it lists them.
@@ -393,7 +357,7 @@ impl Rig {
     /// in another state, or the service names a state this client does not know: a job that
     /// can no longer reach `state` is not waited for.
     async fn until_state(&self, id: &str, state: JobState) -> Job {
-        let mut pace = tokio::time::interval(self.exec.poll());
+        let mut pace = tokio::time::interval(self.cfg.poll);
         loop {
             let job = self.api.get_job(id).await.expect("GetJob");
             let now = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
@@ -439,14 +403,6 @@ impl Rig {
     }
 }
 
-/// One pass of the executor and of the farm, then the executor's poll interval, as the
-/// frontend's driver paces them.
-async fn turn(exec: &mut Executor, farm: &Farm, pace: &mut tokio::time::Interval) {
-    exec.step().await;
-    farm.tick().await;
-    pace.tick().await;
-}
-
 /// The value after `flag` in `args`.
 fn after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     let at = args.iter().position(|arg| arg == flag)?;
@@ -454,17 +410,18 @@ fn after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 /// Asserts the whole way of an action that succeeds: the executor submits it as a job of the
-/// real service under the id made from the frontend and the farm lease, the scheduler places it
-/// on the agent, the agent starts its container with the task tool's arguments (the tree, the
-/// action, the lease), the container exits 0, the service records
-/// the job succeeded with exit code 0, the executor reads that, ingests the pack once and
-/// reports the action ran. Catches a job the real service refuses, never places or ends
+/// real service under the id made from the frontend and the operation's first run, the service
+/// places it on the agent, the agent starts its container with the task tool's arguments (the
+/// tree, the action, the run), the container exits 0, the service records the job succeeded
+/// with exit code 0, the executor reads that, ingests the pack once and answers the operation
+/// with the action's result. Catches a job the real service refuses, never places or ends
 /// otherwise than the fake does, and an executor that reads a real ending as another.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs root, systemd and the pinned js-lease-server and js-agent: beta.yml's js-real-service job fetches them and runs these with cargo xtask sudo-test"]
 async fn a_job_that_exits_0_is_the_actions_result() {
-    let mut rig = Rig::start("xrs-ok").await;
-    let caller = rig.submit(1, LeaseKind::Action);
+    let rig = Rig::start("xrs-ok").await;
+    let caller = rig.submit(1);
+    let run = caller.first_run();
     let Event::Started { name, args } = rig.next_event(&caller).await else {
         panic!("a start first\n{}", rig.logs());
     };
@@ -475,10 +432,10 @@ async fn a_job_that_exits_0_is_the_actions_result() {
     // The agent's init, then the program of the base tree and the job's arguments.
     assert_eq!(after(&args, "--"), Some(TASK_IN_TREE), "{args:?}");
     assert!(args.iter().any(|arg| arg == "--tree"), "{args:?}");
-    let lease = after(&args, "--lease").expect("--lease").to_owned();
-    // The container ends by itself, whether the executor is stepped or not.
+    assert_eq!(after(&args, "--lease"), Some(build_id(run).as_str()));
+    // The container ends by itself.
     assert_eq!(rig.node.next().await, Event::Ended { name });
-    let finished = rig.finish(&caller).await;
+    let finished = caller.done().await;
     assert!(
         matches!(finished, Finished::Ran(_)),
         "{finished:?}\n{}",
@@ -488,18 +445,14 @@ async fn a_job_that_exits_0_is_the_actions_result() {
     let jobs = rig.jobs_of(1).await;
     assert_eq!(jobs.len(), 1, "{jobs:?}");
     let job = &jobs[0];
-    assert!(
-        job.id.ends_with(&format!("-{lease}-0")),
-        "{} for lease {lease}",
-        job.id
-    );
+    assert_eq!(job.id, job_id(FRONTEND, run));
     assert_eq!(job.state(), JobState::Succeeded);
     let result = rig.api.get_result(&job.id).await.expect("GetResult");
     assert_eq!(
         (result.exit_code, result.reason()),
         (Some(0), ResultReason::Exit)
     );
-    assert_eq!(rig.ingest.ingested.lock().expect("ingested").len(), 1);
+    assert_eq!(*rig.ingest.ingested.lock().expect("ingested"), [run]);
     assert_eq!(rig.counter("kbf_executor_jobs_submitted_total"), 1);
     let spec = job.spec.clone().expect("the job's spec");
     assert_eq!(spec.image, "");
@@ -518,16 +471,16 @@ async fn a_job_that_exits_0_is_the_actions_result() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs root, systemd and the pinned js-lease-server and js-agent: beta.yml's js-real-service job fetches them and runs these with cargo xtask sudo-test"]
 async fn a_job_past_its_wall_limit_is_a_timeout() {
-    let mut rig = Rig::start("xrs-wall").await;
+    let rig = Rig::start("xrs-wall").await;
     rig.plan(2, "hold");
     rig.set_timeout(2, Duration::from_secs(1));
-    let caller = rig.submit(2, LeaseKind::Action);
+    let caller = rig.submit(2);
     let Event::Started { name, .. } = rig.next_event(&caller).await else {
         panic!("a start first\n{}", rig.logs());
     };
-    // The agent stops it at the limit, whether the executor is stepped or not.
+    // The agent stops it at the limit.
     assert_eq!(rig.node.next().await, Event::Ended { name });
-    let finished = rig.finish(&caller).await;
+    let finished = caller.done().await;
     match &finished {
         Finished::TimedOut { status, .. } | Finished::Failed(status) => {
             assert_eq!(
@@ -548,17 +501,18 @@ async fn a_job_past_its_wall_limit_is_a_timeout() {
     assert!(rig.ingest.ingested.lock().expect("ingested").is_empty());
 }
 
-/// Asserts that a frontend that stops while its action runs cancels the job: the executor's
-/// shutdown sends the cancel, the agent stops the container (the stand-in `crun` is asked to
-/// kill it, and it ends), and the service records the job cancelled, for the client's cancel.
+/// Asserts that cancelling an operation whose action runs cancels its job: `Dispatch::cancel`
+/// answers true, the executor sends the cancel to the service, the agent stops the container
+/// (the stand-in `crun` is asked to kill it, and it ends), the service records the job
+/// cancelled, for the client's cancel, and the operation's callers are answered `CANCELLED`.
 /// Catches a cancel the real service takes but never carries to the host, or answers in a way
 /// the executor takes for a failure to cancel.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs root, systemd and the pinned js-lease-server and js-agent: beta.yml's js-real-service job fetches them and runs these with cargo xtask sudo-test"]
-async fn a_frontend_that_stops_cancels_its_running_job() {
-    let mut rig = Rig::start("xrs-cancel").await;
+async fn a_cancelled_operation_cancels_its_running_job() {
+    let rig = Rig::start("xrs-cancel").await;
     rig.plan(3, "hold");
-    let caller = rig.submit(3, LeaseKind::Action);
+    let caller = rig.submit(3);
     let Event::Started { name, .. } = rig.next_event(&caller).await else {
         panic!("a start first\n{}", rig.logs());
     };
@@ -566,7 +520,7 @@ async fn a_frontend_that_stops_cancels_its_running_job() {
     assert_eq!(jobs.len(), 1, "{jobs:?}");
     let id = jobs[0].id.clone();
     rig.until_state(&id, JobState::Running).await;
-    rig.exec.shutdown().await;
+    assert!(rig.exec.cancel(&caller.name));
     assert_eq!(rig.node.next().await, Event::Ended { name: name.clone() });
     let job = rig.until_state(&id, JobState::Cancelled).await;
     // Ended, the job no longer shows the cancel as pending (`job.proto`); the result's reason
@@ -580,37 +534,32 @@ async fn a_frontend_that_stops_cancels_its_running_job() {
         "{}",
         rig.logs()
     );
-    assert!(
-        caller.finished().is_none(),
-        "the farm keeps the action for another worker"
-    );
+    match caller.done().await {
+        Finished::Failed(status) => assert_eq!(
+            tonic::Code::from_i32(status.code),
+            tonic::Code::Cancelled,
+            "{status:?}"
+        ),
+        other => panic!("not cancelled: {other:?}\n{}", rig.logs()),
+    }
 }
 
 /// Asserts that a submit whose answer is lost after the service made the job is sent again
 /// with the same job id, that the real service answers the repeat from the job it holds (one
 /// job of the action, not two), and that the action then runs to its end as usual. The relay
-/// in front of the service loses the first answer after the executor's workers are up, which
-/// is the submit's. Catches a resubmit under a fresh id (a second job, run twice), and a real
-/// service that refuses the repeat of a job it holds.
+/// in front of the service loses the first answer it gives once armed, which is the submit's:
+/// nothing else asks the service before the Execute. Catches a resubmit under a fresh id (a
+/// second job, run twice), and a real service that refuses the repeat of a job it holds.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs root, systemd and the pinned js-lease-server and js-agent: beta.yml's js-real-service job fetches them and runs these with cargo xtask sudo-test"]
 async fn a_lost_answer_to_a_submit_makes_one_job() {
     let mut rig = Rig::start("xrs-lost").await;
     let relay = DropFirstAnswer::held(rig.server.job_addr()).await;
     let client = RealJobServer::client_at(&relay.origin(), TOKEN);
-    rig.exec = Rig::executor(
-        &rig.cfg,
-        &rig.farm,
-        client,
-        &rig.inputs,
-        &rig.ingest,
-        &rig.metrics,
-    );
-    rig.until("workers up", |rig| !rig.exec.workers().is_empty())
-        .await;
+    rig.exec = Rig::executor(&rig.cfg, client, &rig.inputs, &rig.ingest, &rig.metrics);
     relay.arm();
-    let caller = rig.submit(4, LeaseKind::Action);
-    let finished = rig.finish(&caller).await;
+    let caller = rig.submit(4);
+    let finished = caller.done().await;
     assert!(
         matches!(finished, Finished::Ran(_)),
         "{finished:?}\n{}",
@@ -620,6 +569,7 @@ async fn a_lost_answer_to_a_submit_makes_one_job() {
     let jobs = rig.jobs_of(4).await;
     assert_eq!(jobs.len(), 1, "{jobs:?}");
     assert_eq!(jobs[0].state(), JobState::Succeeded);
+    assert_eq!(jobs[0].id, job_id(FRONTEND, caller.first_run()));
     assert_eq!(
         rig.counter("kbf_executor_jobs_resubmitted_after_lost_answer_total"),
         1
@@ -635,14 +585,13 @@ async fn a_lost_answer_to_a_submit_makes_one_job() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs root, systemd and the pinned js-lease-server and js-agent: beta.yml's js-real-service job fetches them and runs these with cargo xtask sudo-test"]
 async fn a_whole_machine_action_is_refused_and_no_job_is_made() {
-    let mut rig = Rig::start("xrs-whole").await;
-    let whole = rig.submit(5, LeaseKind::WholeMachine);
-    let finished = rig.finish(&whole).await;
-    match &finished {
+    let rig = Rig::start("xrs-whole").await;
+    let whole = rig.submit_whole(5);
+    match whole.done().await {
         Finished::Failed(status) => assert_eq!(
             tonic::Code::from_i32(status.code),
             tonic::Code::InvalidArgument,
-            "{finished:?}\n{}",
+            "{}",
             rig.logs()
         ),
         other => panic!("not refused: {other:?}\n{}", rig.logs()),
@@ -651,72 +600,6 @@ async fn a_whole_machine_action_is_refused_and_no_job_is_made() {
     assert!(jobs.is_empty(), "{jobs:?}");
     assert_eq!(rig.counter("kbf_executor_jobs_submitted_total"), 0);
 }
-
-/// Asserts what a frontend that restarts does with the job its earlier process left running:
-/// the restarted executor (same frontend id, a process of its own) finds the job on the real
-/// service by its frontend label, cancels it once no new job of the earlier process appears
-/// (the agent stops its container), and the farm, whose lease the earlier process held, runs
-/// the action again as a new job under a new id, which succeeds. The earlier job is not taken
-/// over: tasks live in the process that made them. Catches a restarted frontend that leaves
-/// the earlier job running beside the rerun, or that the real service's listing hides it from.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs root, systemd and the pinned js-lease-server and js-agent: beta.yml's js-real-service job fetches them and runs these with cargo xtask sudo-test"]
-async fn a_restarted_frontend_cancels_the_earlier_job_and_runs_the_action_again() {
-    let mut rig = Rig::start("xrs-restart").await;
-    rig.plan(7, "hold");
-    let caller = rig.submit(7, LeaseKind::Action);
-    let Event::Started { name: first, .. } = rig.next_event(&caller).await else {
-        panic!("a start first\n{}", rig.logs());
-    };
-    let earlier = rig.jobs_of(7).await;
-    assert_eq!(earlier.len(), 1, "{earlier:?}");
-    let earlier = earlier[0].clone();
-    // The earlier process ends without a word; the next one runs the action to its end.
-    rig.plan(7, "exit 0");
-    rig.exec = rig.restarted();
-    assert_eq!(rig.next_event(&caller).await, Event::Ended { name: first });
-    let job = rig.until_state(&earlier.id, JobState::Cancelled).await;
-    assert!(
-        !job.cancel_requested,
-        "ended, the cancel is no longer pending: {job:?}"
-    );
-    let result = rig.api.get_result(&earlier.id).await.expect("GetResult");
-    assert_eq!(result.reason(), ResultReason::Cancelled);
-    assert_eq!(rig.counter("kbf_executor_jobs_adopted_cancelled_total"), 1);
-    let finished = rig.finish(&caller).await;
-    assert!(
-        matches!(finished, Finished::Ran(_)),
-        "{finished:?}\n{}",
-        rig.logs()
-    );
-    let jobs = rig.jobs_of(7).await;
-    assert_eq!(jobs.len(), 2, "{jobs:?}");
-    let later = jobs
-        .iter()
-        .find(|job| job.id != earlier.id)
-        .expect("the rerun");
-    assert_eq!(later.state(), JobState::Succeeded);
-    let instance = |job: &Job| {
-        job.spec
-            .clone()
-            .unwrap_or_default()
-            .labels
-            .get("kbf-instance")
-            .cloned()
-    };
-    assert!(instance(later).is_some());
-    assert_ne!(instance(later), instance(&earlier));
-    assert_eq!(later.id, job_id(FRONTEND, lease_of(later), 0));
-}
-
-/// The farm lease the job `job` was made for, read back from its task tool's `--lease`.
-fn lease_of(job: &Job) -> kbf_types::LeaseId {
-    let spec = job.spec.clone().unwrap_or_default();
-    let lease = after(&spec.args, "--lease").expect("--lease").to_owned();
-    let (term, seq) = lease.split_once('-').expect("<term>-<seq>");
-    kbf_types::LeaseId::new(term.parse().expect("a term"), seq.parse().expect("a seq"))
-}
-
 /// Asserts that the built stand-in answers as the program the name it is run by says, with the
 /// place beside it: as `crun --version` it names a release the agent takes, as `ip -j link
 /// show` it lists no link, both recorded in `stand-in/calls`, and under a name it does not know

@@ -5,16 +5,14 @@ use std::time::Duration;
 
 use js_proto::v1::{JobSpec, NetworkLevel};
 use kbf_proto::reapi::Digest;
-use kbf_types::LeaseId;
 
-use super::{Booking, FRONTEND_LABEL, INSTANCE_LABEL, Settled, job_id, prepare};
-use crate::executor::mac::WorkerOs;
+use super::tests::{Harness, RUN, built_class};
+use super::{Booking, FRONTEND_LABEL, INSTANCE_LABEL, Preparer, Settled, job_id, prepare};
 use crate::executor::out::provider_layer;
-use crate::executor::test_support::{GIB, Harness, built_class};
 use crate::executor::traits::InputsError;
 use crate::executor::{
-    ActionFacts, Ctx, DEFAULT_MAC_OS_VERSION, Deps, Ingest, Ingested, InputTree, Inputs, MacPool,
-    MintError, OUT_TARGET, PackKey, PutDirRoots, System, TASK_IN_TREE, UntrustedLimits, build_id,
+    ActionFacts, DEFAULT_MAC_OS_VERSION, Ingest, Ingested, InputTree, Inputs, MacPool, MintError,
+    OUT_TARGET, PackKey, PutDirRoots, RunId, System, TASK_IN_TREE, UntrustedLimits, build_id,
 };
 
 const TREE: &str = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
@@ -69,7 +67,7 @@ impl Recording {
 impl Ingest for Recording {
     async fn mint(
         &self,
-        lease: LeaseId,
+        run: RunId,
         _: &Digest,
         _: Duration,
         tree: InputTree,
@@ -78,10 +76,10 @@ impl Ingest for Recording {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(tree);
-        Ok(PackKey::new(format!("cas/b/{}/aa-0", build_id(lease))))
+        Ok(PackKey::new(format!("cas/b/{}/aa-0", build_id(run))))
     }
 
-    async fn ingest(&self, _: LeaseId, _: &PackKey, _: &Digest, _: &UntrustedLimits) -> Ingested {
+    async fn ingest(&self, _: RunId, _: &PackKey, _: &Digest, _: &UntrustedLimits) -> Ingested {
         Ingested::Unavailable("not read here".to_owned())
     }
 }
@@ -100,17 +98,17 @@ impl Inputs for Treed {
         })
     }
 
-    async fn tree(&self, _: LeaseId) -> Result<String, InputsError> {
+    async fn tree(&self, _: RunId) -> Result<String, InputsError> {
         Ok(self.tree.to_owned())
     }
 }
 
 /// What a test sets: the form of tree the config asks for, whether the outputs are a put
-/// directory, the worker, and the inputs in place of the harness's.
+/// directory, whether the executor has Macs, and the inputs in place of the harness's.
 struct Case {
     tree: InputTree,
     put_dir: bool,
-    on: WorkerOs,
+    macs: bool,
     inputs: Option<Arc<dyn Inputs>>,
     booking: Booking,
 }
@@ -121,66 +119,49 @@ impl Case {
         Self {
             tree: InputTree::Manifests,
             put_dir: true,
-            on: WorkerOs::Linux,
+            macs: false,
             inputs,
             booking,
         }
     }
 }
 
-/// Prepares the job of lease 7.8 for `case` under the put root `/mnt/ts/put`, with an ingest
+/// Prepares the job of [`RUN`] for `case` under the put root `/mnt/ts/put`, with an ingest
 /// that records what its mint was asked for, which is returned with the job.
-async fn prepared_as(case: Case) -> (Result<Arc<super::Prepared>, Settled>, Vec<InputTree>) {
-    let mut harness = Harness::new().await;
+async fn prepared_as(case: Case) -> (Result<super::Prepared, Settled>, Vec<InputTree>) {
+    let mut harness = Harness::new();
     let roots = PutDirRoots::new("/mnt/ts/put").expect("roots");
     harness.cfg.task_out = case.put_dir.then_some(roots);
     harness.cfg.input_tree = case.tree;
-    if case.on == WorkerOs::Mac {
+    if case.macs {
         harness.cfg.mac = Some(MacPool {
-            hosts: 1,
             bundle: BUNDLE.to_owned(),
             os_version: DEFAULT_MAC_OS_VERSION,
             roots: None,
         });
     }
     let ingest = Arc::new(Recording::default());
-    let deps = Deps {
-        inputs: case
-            .inputs
-            .unwrap_or_else(|| Arc::clone(&harness.deps.inputs)),
-        ingest: Arc::clone(&ingest) as Arc<dyn Ingest>,
-        ..harness.deps.clone()
+    let inputs = case.inputs.unwrap_or_else(|| Arc::clone(&harness.inputs));
+    let ingest_dyn: Arc<dyn Ingest> = Arc::clone(&ingest) as Arc<dyn Ingest>;
+    let ctx = Preparer {
+        inputs: &inputs,
+        ingest: &ingest_dyn,
+        ..harness.preparer()
     };
-    let ctx = Ctx {
-        cfg: &harness.cfg,
-        deps: &deps,
-        twin: &harness.twin,
-        share: None,
-    };
-    let job = prepare(
-        &ctx.preparer(),
-        case.on,
-        LeaseId::new(7, 8),
-        &action(),
-        case.booking,
-    )
-    .await;
+    let job = prepare(&ctx, RUN, &action(), case.booking).await;
     (job, ingest.asked())
 }
 
-/// Prepares the job of lease 7.8 under the put root `/mnt/ts/put`, with `inputs` in place of
+/// Prepares the job of [`RUN`] under the put root `/mnt/ts/put`, with `inputs` in place of
 /// the harness's when given.
 async fn prepared(
     inputs: Option<Arc<dyn Inputs>>,
     booking: Booking,
-) -> Result<Arc<super::Prepared>, Settled> {
+) -> Result<super::Prepared, Settled> {
     prepared_as(Case::new(inputs, booking)).await.0
 }
 
-const SHARE: Booking = Booking::Share {
-    millicpus: 1_500,
-    memory_bytes: GIB,
-};
+const SHARE: Booking = Booking::Share;
 
 /// Asserts the job of a put-directory run: no image, the action tree as its one layer, the
 /// base tree's task tool as its program with the put-directory flags, the run's directory at
@@ -196,7 +177,7 @@ async fn a_put_dir_job_is_the_tree_the_tool_and_the_dir_at_out() {
     let roots = PutDirRoots::new("/mnt/ts/put").expect("roots");
     let dir = "cas/b/7-8/aa-0";
     assert_eq!(prepared.key.as_str(), dir);
-    assert_eq!(spec.job_id, job_id("front", LeaseId::new(7, 8), 0));
+    assert_eq!(spec.job_id, job_id("front", RUN));
     assert_eq!(spec.image, "");
     assert_eq!(spec.command, TASK_IN_TREE);
     assert_eq!(spec.layers, vec![roots.layer(TREE)]);
@@ -206,8 +187,7 @@ async fn a_put_dir_job_is_the_tree_the_tool_and_the_dir_at_out() {
     assert!(spec.files.is_empty() && spec.ports.is_empty() && spec.host_ports.is_empty());
     assert!(spec.env.is_empty());
     let deadline = Duration::from_secs(20).as_millis().to_string();
-    let want =
-        crate::executor::task::put_dir_argv(&action(), LeaseId::new(7, 8), Duration::from_secs(20));
+    let want = crate::executor::task::put_dir_argv(&action(), RUN, Duration::from_secs(20));
     assert_eq!(spec.args, want);
     assert_eq!(
         spec.args[spec.args.len() - 2..],
@@ -221,10 +201,10 @@ async fn a_put_dir_job_is_the_tree_the_tool_and_the_dir_at_out() {
     assert_eq!(spec.needs, Some(js_proto::v1::Needs::default()));
 }
 
-/// Asserts that a whole-machine lease is refused as the caller's before a key is minted: the
+/// Asserts that a whole-machine action is refused as the caller's before a key is minted: the
 /// job service gives a whole-host job no mount.
 #[tokio::test(start_paused = true)]
-async fn a_whole_machine_lease_cannot_commit_into_a_put_dir() {
+async fn a_whole_machine_action_cannot_commit_into_a_put_dir() {
     let refused = prepared(Some(Arc::new(Treed::linux())), Booking::WholeHost)
         .await
         .err()
@@ -255,7 +235,7 @@ async fn a_run_with_no_tree_is_infrastructure() {
         .expect("refused");
     assert_eq!(
         refused,
-        Settled::Infra("no input tree was written for 7.8".to_owned())
+        Settled::Infra("no input tree was written for 7-8".to_owned())
     );
 }
 
@@ -323,7 +303,7 @@ async fn a_linux_run_with_no_task_out_root_is_refused_naming_the_flag() {
 async fn a_mac_job_asks_for_manifests_even_when_the_config_says_provider() {
     let (job, asked) = prepared_as(Case {
         tree: InputTree::Provider,
-        on: WorkerOs::Mac,
+        macs: true,
         inputs: Some(Arc::new(Treed {
             tree: TREE,
             mac: true,

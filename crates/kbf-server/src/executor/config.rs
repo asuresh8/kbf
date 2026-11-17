@@ -38,10 +38,10 @@ pub const PRESIGN_LIMIT: Duration = Duration::from_secs(4 * 3600);
 /// 14, and many grants were dropped as late; at 1 s it is up to 1 s.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 
-/// What the container driver adds to 1.5 times a booking for the hard memory cap of a run
-/// (`kbf-driver-container`, `cgroup.rs`). A Mac job needs the memory it is sent and its host
+/// What the removed daemon's container driver added to 1.5 times a booking for the hard memory
+/// cap of a run. A Mac job needs the memory it is sent and its host
 /// caps it there, so the executor sends the same number and an out-of-memory job is the same
-/// event as an out-of-memory run on a daemon. A Linux job names no memory: the job service
+/// event as an out-of-memory run on a worker. A Linux job names no memory: the job service
 /// sizes it from its class's history.
 const HARD_CAP_PAD: u64 = 512 << 20;
 

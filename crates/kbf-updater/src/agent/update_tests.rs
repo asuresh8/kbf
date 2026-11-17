@@ -16,7 +16,7 @@ use crate::ports::{Clock, Health, PortError};
 use crate::wire::{Health as WireHealth, Outcome, UpdateResult};
 use kbf_types::ReleasePlatform;
 
-const NOW: u64 = 10_000;
+pub(super) const NOW: u64 = 10_000;
 
 fn timing() -> Timing {
     Timing {
@@ -27,9 +27,9 @@ fn timing() -> Timing {
 
 /// One host's A/B over the fakes; `update_report_tests` uses it too.
 pub(super) struct Rig {
-    events: Events,
+    pub(super) events: Events,
     pub(super) local: FakeLocal,
-    drain: FakeDrain,
+    pub(super) drain: FakeDrain,
     pub(super) health: FakeHealth,
     clock: Arc<ManualClock>,
     status: Shared,
@@ -39,7 +39,7 @@ pub(super) struct Rig {
 }
 
 impl Rig {
-    /// A daemon host that runs `VA`, whose node is serving, offered `VB`, which turns out
+    /// A storage host that runs `VA`, whose node is serving, offered `VB`, which turns out
     /// healthy.
     pub(super) fn new() -> Self {
         let events = Events::default();
@@ -61,7 +61,7 @@ impl Rig {
     }
 
     pub(super) fn run(&self, target: &str) -> UpdateResult {
-        let host = host(Role::Daemon);
+        let host = host(Role::Storage);
         let logs = Arc::clone(&self.logs);
         let log = move |line: &str| logs.lock().unwrap().push(line.to_owned());
         let now = self.now;
@@ -94,12 +94,12 @@ impl Rig {
         ])
     }
 
-    fn logged(&self, needle: &str) -> bool {
+    pub(super) fn logged(&self, needle: &str) -> bool {
         self.logs.lock().unwrap().iter().any(|l| l.contains(needle))
     }
 }
 
-fn succeeded(target: &str) -> UpdateResult {
+pub(super) fn succeeded(target: &str) -> UpdateResult {
     UpdateResult::new(version(target), Outcome::Succeeded)
 }
 

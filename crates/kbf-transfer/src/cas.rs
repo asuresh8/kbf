@@ -1,7 +1,7 @@
 //! The blobs a lease reads and writes: the [`Cas`] trait, and the helpers every store
 //! shares ([`digest_of`], [`fetch`], [`label`]).
 //!
-//! A runtime fetches an action, its command and its input tree through a `Cas`, and
+//! A client fetches an action, its command and its input tree through a `Cas`, and
 //! stores outputs, stdout and stderr through it. Every blob is hashed on arrival: a
 //! `Cas` that hands back other bytes than the digest names is caught by [`fetch`] (or
 //! by the store itself, as [`crate::Transfers`] does), not trusted. The front verifies
@@ -49,11 +49,11 @@ pub enum CasError {
     Write(String, String),
 }
 
-/// A content-addressed blob store, SHA-256 only: the daemon's data plane.
+/// A content-addressed blob store, SHA-256 only: the farm's blob data plane.
 ///
-/// Everything a daemon does with the farm's blobs goes through this trait (finding which
+/// Everything a client does with the farm's blobs goes through this trait (finding which
 /// are missing, storing an action's outputs, reading inputs whole or into a file), and
-/// nothing else of the server's store is reachable from the daemon's runtimes, which
+/// nothing else of the server's store is reachable from a client's runtimes, which
 /// are generic over it. [`crate::Transfers`] is the implementation that speaks gRPC to a
 /// server; another that calls a store in the same process must pass the same checks,
 /// which live in `kbf-cas-conformance` (generic over the implementation, run against

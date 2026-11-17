@@ -8,10 +8,10 @@
 //! its token file is not read again.
 //!
 //! **Which roles it asks for.** The mode, not the tables of `kbf.toml`, decides
-//! ([`Want::of`]): `storage` asks for the storage role, `daemon` for the daemon role,
-//! `storage-and-daemon` for both. The token decides what a host may be, and a request
+//! ([`Want::of`]): `storage` asks for the storage role. The token decides what a host may be, and a request
 //! for a role the token lacks is refused whole by the frontend (a typed reason, exit 2:
-//! a restart cannot fix it). `[storage]` and `[daemon]` are settings only.
+//! a restart cannot fix it). `[storage]` is settings only. A host enrolled earlier for more
+//! roles than the mode needs (a daemon role among them) runs the mode on the roles it needs.
 //!
 //! **A node that is enrolled** must hold a certificate for every role of the mode. One
 //! whose `node.json` does not (the mode was changed after enrollment) is refused with exit 2
@@ -36,7 +36,7 @@ use kbf_enroll::pin::{Anchor, system_roots};
 use kbf_enroll::store::{Node as Enrolled, Store, StoreError};
 use kbf_enroll::token::{self, TokenFileError};
 use kbf_proto::kbf::enroll::v1::NodeFacts;
-use kbf_types::{CaPin, Role, RoleSet, RoleSetError};
+use kbf_types::{CaPin, Role, RoleSet};
 
 use crate::names;
 
@@ -68,7 +68,6 @@ impl Env {
                     .nodename()
                     .to_string_lossy()
                     .into_owned(),
-                cpus: std::thread::available_parallelism().map_or(1, usize::from),
             },
             euid: rustix::process::geteuid().as_raw(),
             now: Arc::new(|| {
@@ -159,15 +158,20 @@ pub enum Failure {
         /// The names of the modes.
         modes: String,
     },
+    /// `mode` in `kbf.toml` names a mode that was removed ([`names::REMOVED_MODES`]).
+    #[error("{path}: mode = {value:?}: {}", names::REMOVED)]
+    RemovedMode {
+        /// The config file.
+        path: String,
+        /// What it says.
+        value: String,
+    },
     /// The mode takes its configuration from flags, not from `kbf.toml`.
     #[error(
         "mode {0} takes its configuration from flags, not from kbf.toml; start it as \
          `kbf --mode={0} <flags>`"
     )]
     FlagsOnly(String),
-    /// A set of roles that cannot be (none, or one twice).
-    #[error("roles: {0}")]
-    Roles(#[from] RoleSetError),
     /// What the frontend granted cannot be run here, or is not complete.
     #[error("{0}")]
     Plan(String),
@@ -223,17 +227,12 @@ pub struct Want {
 }
 
 impl Want {
-    /// What `mode` needs: `storage` the storage role, `daemon` the daemon role,
-    /// `storage-and-daemon` both; `None` for a mode that holds no certificate from
-    /// enrollment (the frontend and all-in-one take their files as flags).
+    /// What `mode` needs: `storage` the storage role; `None` for a mode that holds no
+    /// certificate from enrollment (the frontend takes its files as flags).
     #[must_use]
     pub fn of(mode: &str) -> Option<Self> {
         let (mode, roles): (&'static str, &[Role]) = match mode {
             names::STORAGE => (names::STORAGE, &[Role::Storage]),
-            names::DAEMON => (names::DAEMON, &[Role::Daemon]),
-            names::STORAGE_AND_DAEMON => {
-                (names::STORAGE_AND_DAEMON, &[Role::Storage, Role::Daemon])
-            }
             _ => return None,
         };
         Some(Self {
@@ -350,9 +349,6 @@ pub fn ensure_enrolled(loaded: &Loaded, want: Want, env: &Env) -> Result<Outcome
         };
         Ok::<_, Failure>(enroll(&frontend, &loaded.store, &attempt).await?)
     })?;
-    for warning in config.role_warnings(RoleSet::new(node.roles())?) {
-        eprintln!("kbf: warning: {warning}");
-    }
     Ok(Outcome { node, fresh: true })
 }
 

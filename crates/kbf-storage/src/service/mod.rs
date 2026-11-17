@@ -3,7 +3,7 @@
 //! `Arc<dyn Storage>`).
 //!
 //! **The wire.** Blob calls are the standard protocols, because every REAPI client and
-//! the daemon's transfer engine (`kbf-transfer`) already speak them:
+//! the transfer engine (`kbf-transfer`) already speak them:
 //!
 //! - `ContentAddressableStorage.FindMissingBlobs`. The batch calls and `GetTree` answer
 //!   UNIMPLEMENTED: a frontend reaches single blobs through ByteStream, and the batch
@@ -40,7 +40,7 @@
 //! **Reads served from the node's own copy** are counted ([`crate::legacy`], rendered as
 //! `kbf_storage_legacy_read_total{kind,source}` on the node's `/metrics`): a `Read` that found
 //! its blob, an action-store `Get` that found its entry, a `Segments` `ReadRange` that returned
-//! bytes, and the same reads made through [`InProcess`]. Misses, `FindMissingBlobs` and writes
+//! bytes. Misses, `FindMissingBlobs` and writes
 //! are not.
 //!
 //! **Who may call** is [`Admission`]: the role in the caller's certificate against the
@@ -61,7 +61,6 @@ mod cas;
 mod catch_up;
 mod client;
 mod generation;
-mod in_process;
 mod open_writes;
 mod segments;
 #[cfg(test)]
@@ -88,7 +87,6 @@ pub use admission::{Admission, Endpoint, PeerNames, PeerRole, ROLE_URI_PREFIX, h
 pub use catch_up::CatchUp;
 pub(crate) use client::lift;
 pub use client::{RemoteStorage, stale_generation};
-pub use in_process::InProcess;
 pub use open_writes::{OpenWrite, OpenWrites};
 
 /// The metadata entry that carries the map generation on the standard calls.
@@ -295,8 +293,7 @@ impl StorageService {
         Arc::new(self).shared_routes()
     }
 
-    /// [`Self::routes`] for a service the caller keeps a handle on, so that the process
-    /// that serves it can also call it ([`Self::in_process`]).
+    /// [`Self::routes`] for a service the caller keeps a handle on.
     #[must_use]
     pub fn shared_routes(self: &Arc<Self>) -> Routes {
         let this = Arc::clone(self);
@@ -320,14 +317,5 @@ impl StorageService {
                 .max_decoding_message_size(MAX_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_MESSAGE_BYTES),
         )
-    }
-
-    /// The service called in this process, without a connection ([`InProcess`]): what the
-    /// daemon half of a storage-and-daemon process uses for the one member that is its own
-    /// node, so that a write it makes takes the path a call from another node takes (the
-    /// generation check, the chain's forward to the replica).
-    #[must_use]
-    pub fn in_process(self: &Arc<Self>) -> InProcess {
-        InProcess::new(Arc::clone(self))
     }
 }

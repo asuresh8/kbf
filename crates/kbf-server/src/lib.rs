@@ -6,11 +6,11 @@
 //!   [`raft_log`]; an S3 or local-directory object store, with an optional local hot
 //!   store in front of it; the flags that choose them are `--cold-store`,
 //!   `--hot-store` and `--meta-dir`, see [`stores`]).
-//! - `kbf.worker.v1` on another ([`worker`]): daemons register, heartbeat, receive
-//!   lease offers and `Start`s, and report results. Under mutual TLS a daemon's
-//!   certificate must name its node, and a deny list refuses certificates and nodes
-//!   ([`identity`]). The same listener serves daemons `ByteStream` for their blob
-//!   reads and writes ([`blobs`]), each call admitted by the same rules.
+//! - The worker listener on another: storage nodes register and heartbeat with
+//!   `kbf.map.v1.Membership`, and a host's updater makes its node calls
+//!   ([`node_self`]). Under mutual TLS a certificate must name its node, and a deny list
+//!   refuses certificates and nodes ([`identity`]). No node opens a session to a server:
+//!   the farm's workers are the executor's ([`executor`]), registered in-process.
 //! - The operator API ([`api`]): HTTP/JSON under `/v1` on a third listener, off unless
 //!   `--api-listen` is given; `GET /v1/nodes`, and cordon, drain and uncordon, which
 //!   need the token of `--api-token-file` ([`token`]), and, behind the farm's proxy
@@ -53,8 +53,6 @@
 //!   served alone over gRPC by `kbf_storage::service` (blobs through the standard
 //!   protocols, the action cache through `kbf.storage.v1`), each call admitted by the
 //!   role in the caller's certificate. No scheduler, REAPI or state store.
-//!   [`storage_half`] is the same start for `kbf storage-and-daemon`, keeping the storage
-//!   its listener serves for the daemon half in the same process.
 //!
 //! - The frontend ([`frontend`], `kbf frontend`): the REAPI listener, the scheduler,
 //!   the worker streams and the operator API, with no cache of its own. CAS, ByteStream
@@ -65,7 +63,7 @@
 //! record commits as soon as it is appended, see [`farm`]), REAPI authentication other than the policies
 //! `kbf-auth` builds (`allow`, `deny`, `any`, `all`), operator roles (the
 //! API's writes need one token, [`token`]), the `x-kbf-qos` header, learned sizes,
-//! capability matching, and the daemon-side `ResultAck` handling (issue #26).
+//! capability matching, and the worker-side `ResultAck` handling (issue #26).
 
 pub mod action_usage;
 pub mod answer;
@@ -73,7 +71,6 @@ pub mod answer;
 pub(crate) mod answer_tests;
 pub mod api;
 pub mod api_client;
-pub mod blobs;
 #[cfg(test)]
 mod build_commit;
 #[doc(hidden)]
@@ -86,6 +83,7 @@ pub mod drain;
 pub mod enroll;
 pub mod executor;
 pub mod farm;
+mod farm_write_metrics;
 mod fault;
 pub mod fill;
 mod flag_set;
@@ -101,17 +99,13 @@ mod http_history;
 pub mod http_invocations;
 pub mod http_sched;
 pub mod identity;
-mod input_cache_metrics;
 pub mod job_tree;
 pub mod join;
 mod key_file;
 pub mod learned;
 mod listen;
-mod load_metrics;
-mod local;
 pub mod log_file;
 pub mod machine;
-mod map_push;
 pub mod members;
 pub mod members_rpc;
 mod memory;
@@ -121,8 +115,6 @@ pub mod node_map;
 pub mod node_self;
 mod notify;
 pub mod object_store;
-mod pack_daemon_metrics;
-pub mod pack_locate;
 pub mod placement_load;
 pub mod placement_predictions;
 pub mod proxy_auth;
@@ -136,6 +128,7 @@ pub mod replication;
 pub mod retire;
 pub mod retired;
 mod run_record;
+mod sched_load_metrics;
 pub mod scheduler_core;
 pub mod sequence;
 pub mod serve;
@@ -154,7 +147,6 @@ mod startup_pass;
 pub mod state_store;
 mod stop;
 pub mod storage_gate;
-pub mod storage_half;
 pub mod storage_health;
 pub mod storage_node;
 pub mod store_config;
@@ -177,7 +169,7 @@ pub mod worker_roles;
 pub mod write_tier;
 
 pub use config::{Args, ConfigError, Role, SERVER, s3_store};
-pub use drain::{Drain, DrainStatus, Hold};
+pub use drain::{Drain, DrainStatus};
 pub use farm::{
     ACK_WINDOW, DONE_FLOOR, EpochBump, EpochPolicy, Farm, ID_BLOCK, INTAKE_POLL, ORPHAN_WAIT,
     OWNER_CACHE_TTL, SESSION_RENEWAL, StateError,
@@ -189,7 +181,6 @@ pub use kbf_sched::MemoryLadder;
 pub use kbf_tls::{TlsError, TlsFiles, TlsSource};
 pub use learned::LearnedSizes;
 pub use listen::Held;
-pub use local::LocalStore;
 pub use node_map::NodeMap;
 pub use placement_load::PlacementLoad;
 pub use placement_predictions::PlacementPredictions;
@@ -197,8 +188,8 @@ pub use raft_log::{RaftLogError, RaftMetaLog};
 pub use scheduler_core::SchedulerCore;
 pub use serve::{
     Api, Behind, Bound, BoundStorage, Listeners, ServeError, StorageListener, StreamTiming,
-    WorkerTls, bind_server, bind_server_with_api, bind_server_with_map, bind_server_with_policy,
-    bind_server_with_state, bind_server_with_storage, bind_service, bind_storage,
+    WorkerTls, bind_server, bind_server_with_api, bind_server_with_policy, bind_server_with_state,
+    bind_server_with_storage, bind_service, bind_storage,
 };
 pub use start::{ServerHandle, interrupted, serve_with, sizes_on, start, start_interruptible};
 pub use start_exit::{
@@ -212,7 +203,6 @@ pub use ui_mount::{bind_server_holding, bind_server_with_options, bind_server_wi
 pub use usage_profiles::UsageProfiles;
 pub use whole_node::WholeNodeFlags;
 pub use worker::HostFloor;
-pub use worker::WorkerService;
 
 /// The commit the server was built from: 12 hex digits, or `unknown` when the build
 /// had no git checkout. `build.rs` embeds it (`src/build_commit.rs` has the rule,

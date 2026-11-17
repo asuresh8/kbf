@@ -9,7 +9,7 @@ fn a_binary_is_found_in_the_profile_directory_above_the_test_binarys() {
     let dir = crate::scratch("stand-in");
     std::fs::create_dir_all(dir.join("debug/deps")).expect("dirs");
     std::fs::write(dir.join("debug/fake"), b"").expect("file");
-    let exe = dir.join("debug/deps/beta_b0-1234");
+    let exe = dir.join("debug/deps/farm_tests-1234");
     assert_eq!(sibling_of(&exe, "fake"), dir.join("debug/fake"));
 }
 
@@ -37,8 +37,15 @@ fn a_binary_that_was_not_built_says_how_to_build_it() {
 }
 
 #[test]
-fn the_stand_ins_of_this_package_are_built_beside_its_tests() {
-    // Catches: a `[[bin]]` renamed in Cargo.toml and not here (a caller then fails with
-    // the message above, only when it runs).
-    assert!(sibling_bin(FAKE_BUCK2).is_file(), "{FAKE_BUCK2}");
+fn a_built_binary_is_found_beside_the_running_test_binary() {
+    // Catches: a lookup that does not start from the running test binary: the stand-in this
+    // package builds is found in the profile directory above the test binary's own.
+    let found = sibling_bin("kbf-harness-watcher");
+    assert!(found.is_file(), "{}", found.display());
+    assert_eq!(
+        found.file_name().and_then(|n| n.to_str()),
+        Some("kbf-harness-watcher")
+    );
+    let exe = std::env::current_exe().expect("the test binary");
+    assert!(exe.starts_with(found.parent().expect("a directory")));
 }

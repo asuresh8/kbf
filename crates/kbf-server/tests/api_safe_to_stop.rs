@@ -25,7 +25,7 @@ use kbf_state::fake::{Fake, Flaw};
 use kbf_state::{ManualClock, Store};
 use kbf_types::{NodeId, Role, RoleSet, TokenId, TokenSecret};
 use serde_json::{Value, json};
-use support::{API_TOKEN, Cell, FakeDaemon, HELLO_WAIT, INTERVAL, hello, hello_on};
+use support::{API_TOKEN, Cell, FakeDaemon, hello, hello_on};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -68,15 +68,12 @@ fn listeners() -> Listeners {
         worker: loopback,
         reapi_tls: None,
         worker_tls: None,
-        heartbeat_interval: INTERVAL,
-        hello_wait: HELLO_WAIT,
         tick: TICK,
         unservable_wait: kbf_sched::UNSERVABLE_WAIT,
         default_platform: kbf_front::DefaultPlatform::NONE,
         qos_allowed: kbf_front::QosAllow::DEFAULT,
         memory_ladder: kbf_server::MemoryLadder::default(),
         memory_climb: true,
-        vm_host_floor: kbf_server::HostFloor::default(),
         learned_sizes: kbf_server::LearnedSizes::Off,
         exclusive_actions: false,
         placement_load: kbf_server::PlacementLoad::Off,
@@ -88,15 +85,14 @@ fn listeners() -> Listeners {
         streams: kbf_server::StreamTiming::default(),
         store_probe_timeout: kbf_server::health::STORE_PROBE_TIMEOUT,
         invocation_memory: kbf_front::DEFAULT_INVOCATION_MEMORY,
-        segments: kbf_front::SegmentsConfig::DEFAULT,
         stream_limits: kbf_server::StreamLimits::DEFAULT,
     }
 }
 
 struct Server {
     api: SocketAddr,
-    /// Where daemons open their sessions.
-    worker: SocketAddr,
+    /// The farm the daemons register with.
+    farm: std::sync::Weak<kbf_server::farm::Farm>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -114,7 +110,6 @@ fn start(state: Option<StateStore>) -> Server {
     let api = Api {
         listen: SocketAddr::from(([127, 0, 0, 1], 0)),
         token: Some(token()),
-        local_cache: None,
     };
     let bound = bind_server_with_state(
         Arc::new(Cache::<MemoryMetaLog, MemoryStore>::memory()),
@@ -128,11 +123,11 @@ fn start(state: Option<StateStore>) -> Server {
     )
     .expect("bind");
     let api = bound.api.expect("an API address");
-    let worker = bound.worker;
+    let farm = bound.farm.clone();
     tokio::spawn(async move { bound.serving.await.expect("serve") });
     Server {
         api,
-        worker,
+        farm,
         stop: Some(stop),
     }
 }
@@ -327,7 +322,7 @@ async fn a_daemon_is_safe_to_stop() {
     let reasons = said["reasons"].as_array().expect("reasons");
     assert_eq!(reasons.len(), 1, "{said}");
     let line = reasons[0].as_str().unwrap_or_default();
-    assert!(line.contains("daemon"));
+    assert!(line.contains("worker"));
 
     let unknown = "/v1/members/linux-2/safe-to-stop";
     let (code, said) = api_http::get(api, unknown).await;
@@ -420,7 +415,7 @@ async fn a_node_is_judged_as_the_storage_member_it_enrolled_with() {
     ];
     let mut daemons = Vec::new();
     for greeting in hellos {
-        let daemon = FakeDaemon::connect(server.worker, greeting).await;
+        let daemon = FakeDaemon::connect(server.farm.clone(), greeting).await;
         daemons.push(daemon.expect("registered"));
     }
 

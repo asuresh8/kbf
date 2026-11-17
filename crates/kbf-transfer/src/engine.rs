@@ -1,4 +1,4 @@
-//! [`Transfers`], one per daemon process, and [`Scope`], a lease's view of it.
+//! [`Transfers`], one per client process, and [`Scope`], a lease's view of it.
 //!
 //! Every request takes one permit of `--transfer-in-flight` for as long as it is out:
 //! a ByteStream read or write, a `PutRange`, or a FindMissing call. The permits are
@@ -45,8 +45,7 @@ use crate::source::Record;
 use crate::stats::{Counts, EngineStats, TransferStats, add};
 use crate::wire::{Wire, WriteFailed, call_error, committed, retryable};
 
-/// The shared transfer engine of one daemon process
-/// (`docs/design/worker-cache.md#4-the-shared-transfer-engine`): one connection to the
+/// The shared transfer engine of one client process: one connection to the
 /// server's CAS, one in-flight limit and one byte budget for every lease. A runtime
 /// takes a [`Scope`] per lease ([`Cas::lease`]); the engine itself is a [`Cas`] too,
 /// whose transfers count for no lease.
@@ -133,7 +132,7 @@ impl Transfers {
 /// One lease's view of the engine: a [`Cas`] whose transfers count in its own
 /// [`TransferStats`]. Its requests are futures that borrow it, so dropping a lease's
 /// work drops its requests: one only queued never starts, and a fetch another caller
-/// waits on goes on (`docs/design/worker-cache.md#44-limits-retries-cancellation`).
+/// waits on goes on.
 #[derive(Debug)]
 pub struct Scope {
     pub(crate) inner: Arc<Inner>,

@@ -1,9 +1,11 @@
 # The worker protocol: `kbf.worker.v1`
 
+> **kbf-daemon is deleted.** No shipped program opens this `Session` stream any more: placed actions run only as js-agent jobs. The protocol is kept as shipped vocabulary: `kbf-server` serves neither the `Session` stream nor the daemon's blob, `PackIndex` and map-push services, and every message stays defined in the `.proto`. Where this page says the daemon does something, it describes the deleted `kbf-daemon`; its design page (`daemon.md`) is deleted too.
+
 `kbf.worker.v1` is the protocol between `kbf-daemon` and `kbf-server`. Its definition
 is [worker.proto](../../crates/kbf-proto/proto/kbf/worker/v1/worker.proto); this
 document explains the rules both sides keep and why. The scheduler side is in
-[scheduler.md](scheduler.md), the daemon side in [daemon.md](daemon.md).
+[scheduler.md](scheduler.md), the daemon side in `daemon.md`, deleted with kbf-daemon.
 
 ## Shape
 
@@ -99,7 +101,7 @@ measures can show an overload, and the limit of its reserve (`--reserve-cpus`) o
 `off` ignore the field. The write happens off the async workers after the `Welcome` is taken and
 before the stream's first `Heartbeat`, and a failed write is logged and does not end the stream.
 Until the first `Welcome` the limit written at start stays. See
-[linux-build-host.md](../deploy/linux-build-host.md#the-limit-under-placement-by-measured-load---actions-cpu-max).
+`linux-build-host.md`, deleted with kbf-daemon.
 
 **Only the first `Hello` of a stream registers the node.** It opens a new session, and
 from then on every `Start` for this node goes to this stream. A `Hello` resent on the
@@ -268,7 +270,7 @@ leaves the map and its blobs move to other owners.
 
 **The file is the worker listener's only.** The storage nodes' own listeners do not read
 it. What they refuse is the storage map's deny list, which the operator writes with
-`POST /v1/denied` ([api.md](../api.md#post-v1denied-and-delete-v1denied)): the same three
+`POST /v1/denied` ([api.md](../api.md#get-v1denied-post-v1denied-and-delete-v1denied)): the same three
 kinds of entry, applied to every storage endpoint and to the membership service, and
 carried to the nodes in the map (the file is not). An entry in the file does not stop a
 storage node's data-plane calls; an entry in the map does. The reverse also holds: this
@@ -323,7 +325,7 @@ call is served as the REAPI listener serves it (the chunking calls of
 `ActionCache` and `Capabilities` answer `UNIMPLEMENTED` on this listener. Today's
 daemon CAS client calls only `ByteStream`; FindMissingBlobs and the batch calls are
 there for the transfer engine planned in
-[worker-cache.md](worker-cache.md#4-the-shared-transfer-engine).
+`worker-cache.md`, deleted with kbf-daemon.
 
 The worker listener also serves `kbf.worker.v1.Segments` (`Begin`, `PutRange`,
 `Commit`, `Locate`, `ReadRange`), each call admitted by the same rule: a daemon uploads
@@ -392,7 +394,7 @@ The daemon heartbeats at the interval `Welcome` named. A `Heartbeat` carries:
   when the runtime has an input cache open. A runtime without one, and a daemon built before the
   field, send none (absent is not zero), and a server built before it skips the field. The server
   keeps the newest of each node for `GET /metrics` (`kbf_node_input_cache_*`) and
-  `GET /v1/nodes/{id}` ([api.md](../api.md#input-cache-counts)); a restarted daemon counts again
+  `GET /v1/nodes/{id}` (a section of api.md deleted with the counts); a restarted daemon counts again
   from 0.
 - `node_load` (optional): one reading of the node's `actions/` cgroup (`NodeLoad`). `seq` counts up
   by one from 1 for each reading within a daemon process; `mono_usec` is the daemon's monotonic
@@ -406,7 +408,7 @@ The daemon heartbeats at the interval `Welcome` named. A `Heartbeat` carries:
   runtime takes readings (the container runtime does); a reading that fails leaves it out (logged
   once per failing file), and a daemon or runtime without readings, or one built before the field,
   sends none. A server built before the field skips it. The server accepts and shows readings under
-  the rule of [api.md](../api.md#node-load) and hands each accepted reading to the scheduler, as
+  the rule api.md gave before the reading was deleted and hands each accepted reading to the scheduler, as
   described below.
 
   Two lists of a reading say when each lease started and what each used, minute by minute:
@@ -456,7 +458,7 @@ The daemon heartbeats at the interval `Welcome` named. A `Heartbeat` carries:
   nothing.
 
   The server vets the lists of each reading it accepts and counts what it dropped, by reason, in
-  the node view ([api.md](../api.md#node-load): `lists`). It counts the minutes of a reading it
+  the node view (`lists`, deleted from api.md with the reading). It counts the minutes of a reading it
   refuses under the accept rule as refused, and uses them for nothing. It hands the accepted
   reading, with the lists that passed the vet, to the scheduler (`Event::Heartbeat.load`) on the
   same heartbeat, under every `--placement-load` mode: the scheduler keeps the readings whether or
@@ -718,7 +720,7 @@ action cache with the result.
 What software the node runs, for operators: the OS name, version and build, the
 kernel release (Linux), the `kbf-daemon` version, and the container images the daemon was pinned to
 and checked present at start (`container_images`, container driver: see
-[daemon.md](daemon.md#the-container-driver)). It routes no work, so it is not part of the node report and does not change
+`daemon.md`, deleted with kbf-daemon). It routes no work, so it is not part of the node report and does not change
 `report_hash` (see [fleet-updates.md](fleet-updates.md) section 3.1). The daemon reads
 `os-release` and the kernel release. The wire message also has `xcode_builds` and `xcodes`
 fields, which no daemon fills now (the Macs run no `kbf-daemon`); a server still reads them, and a reader skips what it does
@@ -771,7 +773,7 @@ daemon restarts and server restarts:
    same daemon process (`Hello.instance_id`) and that the new session's heartbeat
    leaves out. (Re-adopting running work across a daemon restart is **planned**; today
    a restarted daemon lists nothing, and ends what its predecessor left running
-   before its `Hello`: see [daemon.md](daemon.md#when-the-daemon-is-killed).)
+   before its `Hello`: see `daemon.md`, deleted with kbf-daemon.)
 7. **Only a daemon process speaks for its own leases.** Two processes may register as
    one node: a restarted daemon, or two daemons holding the node's certificate (a
    cloned machine, a second daemon started, a node replaced while the old one runs).
@@ -781,7 +783,7 @@ daemon restarts and server restarts:
    whose stream is no longer acknowledged, has fenced (issue #140). A process that
    was killed fences nothing: its runs are ended by each run's keeper as the process
    dies, and by the next daemon started on the node, before that one's `Hello` (issue
-   #155); see [daemon.md](daemon.md#when-the-daemon-is-killed) for what neither
+   #155); see `daemon.md`, deleted with kbf-daemon for what neither
    reaches. The one exception is a process proven stopped by its successor
    (`Hello.predecessor_instance_id`, its stream closed): its leases go at once.
 
@@ -802,7 +804,7 @@ daemon restarts and server restarts:
   server. The daemon retries forever, with a backoff that grows to a bound. This part
   is built: `--server` is repeatable, each host is resolved again every round, and the
   wait doubles with jitter up to `--reconnect-max-ms` (see
-  [daemon.md](daemon.md#reaching-a-server)); the redirect is planned. On
+  `daemon.md`, deleted with kbf-daemon); the redirect is planned. On
   failover the daemon reconnects to the new leader and keeps its running leases (the
   epoch names the log, above). Its blob calls go to the worker listeners of all the
   servers, with reads spread across them.

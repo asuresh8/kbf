@@ -28,8 +28,9 @@ const USERS: [&str; 2] = ["kbf-deploy", "kbf-server"];
 const LEASE_CLIENT: &str = "kbf_lease_client";
 
 /// The crates whose tests alone may depend on the client, as a dev-dependency only: the
-/// real-service tests of kbf-integration-test.
-const TESTS: [&str; 1] = ["kbf-integration-test"];
+/// real-service tests of kbf-integration-test, and kbf-cli's process tests of the frontend's
+/// drain, which run the `kbf` binary against the client's fake job service.
+const TESTS: [&str; 2] = ["kbf-cli", "kbf-integration-test"];
 
 /// The `js-*` crates the client may reach: the generated messages and service, and what
 /// `js-proto` needs: `js-caps` (through which it converts a job's needs into capability keys,
@@ -166,7 +167,7 @@ fn a_crate_that_depends_on_the_job_client_is_named() {
                 {"name": "kbf-job-client", "kind": "dev"}, {"name": "tonic", "kind": null}]},
             {"name": "kbf-storage", "dependencies": [{"name": "kbf-job-client", "kind": null}]},
             {"name": "kbf-front", "dependencies": [{"name": "kbf-job-client", "kind": "dev"}]},
-            {"name": "kbf-node", "dependencies": [{"name": "tonic", "kind": null}]},
+            {"name": "kbf-sched", "dependencies": [{"name": "tonic", "kind": null}]},
             {"name": "kbf-deploy", "dependencies": [
                 {"name": "kbf-job-client", "kind": null},
                 {"name": "kbf-job-client", "kind": "dev"}]},

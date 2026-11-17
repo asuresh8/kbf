@@ -1,5 +1,4 @@
-//! The host executor: running a placed action as a job of the job service instead of on a
-//! `kbf-daemon`.
+//! The host executor: running a placed action as a job of the job service.
 //!
 //! # How it sits in the server
 //!
@@ -8,16 +7,15 @@
 //! (and, with `--executor-mac-hosts`, Mac workers `js-mac:<frontend>-<n>` whose one driver is
 //! `native`, [`mac`]; with [`Ownership::Shared`] both carry the process's instance,
 //! `js:<frontend>.<instance>-<n>` and `js-mac:<frontend>.<instance>-<n>`),
-//! and takes the messages the farm sends a daemon on the channel it owns the receiving end of.
+//! and takes the messages the farm sends a worker on the channel it owns the receiving end of.
 //! A `Start` is submitted to the job service as a job of the kbf image, whose entrypoint is the
 //! task tool (a `whole_machine` lease's as a job that needs the whole host), under an id
 //! made from the farm lease, so a submit sent again makes no second job; the job is read back
 //! until it ends, its ending is mapped to the farm's failure classes ([`outcome`]), and the
-//! result is reported the way a daemon reports one. A `Cancel` is a cancel of the job. The
+//! result is reported the way a worker reports one. A `Cancel` is a cancel of the job. The
 //! executor holds no capacity, renews nothing and never sees where a job runs. `worker.rs`, the
 //! scheduler core and the sched crates are untouched, and a server that never builds an
-//! [`Executor`] never opens a connection to a job service: [`ExecutorKind::KbfDaemon`] is the
-//! path every server runs by default.
+//! [`Executor`] never opens a connection to a job service.
 //!
 //! Who owns the jobs is [`Config::ownership`]. With [`Ownership::Single`], the default, the
 //! executor runs on exactly one frontend: it labels its jobs with its frontend id and an id of
@@ -97,17 +95,6 @@ pub use traits::{
     ActionFacts, Ingest, Ingested, Inputs, InputsError, MintError, Presign, PresignError,
     ReadGrant, RejectReason, UntrustedLimits,
 };
-
-/// Which executor a server runs placed actions on.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ExecutorKind {
-    /// The `kbf-daemon` of each node, over `kbf.worker.v1`: the default path, and the
-    /// rollback.
-    #[default]
-    KbfDaemon,
-    /// Jobs of the job service, run by [`Executor`].
-    JsAgent,
-}
 
 /// What the executor is built over.
 #[derive(Clone)]

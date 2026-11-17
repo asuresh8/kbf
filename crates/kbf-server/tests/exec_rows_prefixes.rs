@@ -13,15 +13,13 @@ use std::path::{Path, PathBuf};
 use kbf_server::executor::rows::{FRONTEND_PREFIX, JOB_PREFIX, ROOT, WORKER_PREFIX};
 
 /// The crates that scan the state store (`kbf-state` in their manifests).
-const CRATES: [&str; 17] = [
+const CRATES: [&str; 15] = [
     "kbf-cli",
-    "kbf-daemon",
     "kbf-deploy",
     "kbf-enroll-registry",
     "kbf-front",
     "kbf-history",
     "kbf-installer",
-    "kbf-node",
     "kbf-pack",
     "kbf-pack-adopt",
     "kbf-pack-index",

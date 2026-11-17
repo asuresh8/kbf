@@ -3,11 +3,11 @@
 # overrides its key. A secret is the path of the file that holds it.
 
 [daemon]
-# Worker threads of the async runtime, which run every task between its waits. Default: every CPU the process may use on the server; `max(2, reserve/4)`, at most the physical cores, on the daemon
+# Worker threads of the async runtime, which run every task between its waits. Default: every CPU the process may use
 # async-threads = "N"
-# The most threads the runtime's blocking pool runs at once, for calls that wait on a disk or a process (a thread is made when a call needs one and ends when idle). Default: 512 (tokio's) for the server, 64 for the daemon
+# The most threads the runtime's blocking pool runs at once, for calls that wait on a disk or a process (a thread is made when a call needs one and ends when idle). Default: 512 (tokio's)
 # blocking-threads = "N"
-# Threads for CPU-bound work, such as hashing, which never waits and so is held to the CPUs. Default: every CPU the process may use on the server; `max(2, reserve/2)`, at most the physical cores, on the daemon
+# Threads for CPU-bound work, such as hashing, which never waits and so is held to the CPUs. Default: every CPU the process may use
 # cpu-threads = "N"
 
 [enroll-service]
@@ -19,7 +19,7 @@ ca-dev-file-signer = false
 # ca-signer = "SOCKET"
 # Does nothing: this build enforces the deny rows a node revocation writes, so --enroll-listen needs no acceptance. Still accepted so existing units start; it will be removed in a later release.
 enroll-allow-unenforced-deny = false
-# What --cas is for a daemon-only node, told to every node. Empty: none.
+# What --cas is for a worker-only node, told to every node. Empty: none.
 # enroll-cas-endpoint = "URL"
 # How long the certificates the CA issues live (3600 to 2592000); a node renews at half. The signer's own --lifetime-secs must be at least this.
 enroll-cert-lifetime-secs = 604800
@@ -33,14 +33,14 @@ enroll-rate-burst = 30
 enroll-rate-per-minute = 60
 # The port a storage node serves on, told to every node.
 # enroll-storage-port = "PORT"
-# The https URL a daemon dials (--server), told to every node. Empty: none.
+# The https URL a worker dials (--server), told to every node. Empty: none.
 # enroll-worker-endpoint = "URL"
 # A name this frontend serves, a DNS name or an IP address; repeat it for each. The enroll listener's certificate carries these names, and no node may advertise one or a host under one.
 # frontend-name = []
 
 [executor]
-# Where the farm runs the actions it places. `kbf-daemon`, the default, is the daemon of each node, over the worker listener: no executor is built and no job service is contacted, whatever the other `--executor-*` flags say. `js-agent` runs each as a job of the job scheduler's job service, in the kbf image (`--executor-kbf-image`, built from `--executor-base-image`), whose task tool runs the action inside it; it needs the job service's flags (`--executor-job-url`, `--executor-job-token-file`, and `--executor-job-ca-file` for https), `--executor-frontend-id`, the release's base tree bundles (`--executor-base-tree`), the packs (`--pack-store-endpoint`) and the secret delivery (`--executor-secret-delivery`, with `--executor-insecure-argv-secrets` for its default `argv`); the virtual workers' shape (`--executor-hosts`, `--executor-host-cpus`, `--executor-host-memory-gib`) has defaults. The executor runs on exactly one frontend: a second frontend that has jobs on the same job service stops. A restart of the frontend fails the builds in flight. Switching back to `kbf-daemon` cancels the jobs when the frontend is stopped, not when it is killed: a killed frontend's jobs run to their wall limit, unless a later `js-agent` start cancels them. `--executor-insecure-argv-secrets` is ignored with `kbf-daemon`
-executor = "kbf-daemon"
+# Where the farm runs the actions it places: `js-agent`, the only value, runs each as a job of the job scheduler's job service, in the kbf image (`--executor-kbf-image`, built from `--executor-base-image`), whose task tool runs the action inside it; it needs the job service's flags (`--executor-job-url`, `--executor-job-token-file`, and `--executor-job-ca-file` for https), `--executor-frontend-id`, the release's base tree bundles (`--executor-base-tree`), the packs (`--pack-store-endpoint`) and the secret delivery (`--executor-secret-delivery`, with `--executor-insecure-argv-secrets` for its default `argv`); the virtual workers' shape (`--executor-hosts`, `--executor-host-cpus`, `--executor-host-memory-gib`) has defaults. The executor runs on exactly one frontend: a second frontend that has jobs on the same job service stops. A restart of the frontend fails the builds in flight. A frontend stopped cancels its jobs; a killed frontend's jobs run to their wall limit, unless a later `js-agent` start cancels them. Left out, no executor is built and no job service is contacted, whatever the other `--executor-*` flags say; `--executor-insecure-argv-secrets` is then ignored
+# executor = "KIND"
 # Says jobs may be given an open network: what `--executor-network open` needs, and refused with any other `--executor-network`. Off by default. Used only with `--executor js-agent`
 executor-allow-open-network = false
 # Lets the task read its inputs through a read grant served over `http://`: an `http://` `--task-read-url` is accepted, and the task tool is given `--allow-plain-http-grant`. The read token then crosses the job network in clear, so this is for a farm on its own network. Off by default, and an `http://` read url is refused without it. Used only with `--executor js-agent`
@@ -51,7 +51,7 @@ executor-allow-plain-http-put = false
 executor-arch = "x86_64"
 # The base environment the Command of an action sees, pinned by digest as `<repository>@sha256:<64 hex digits>` (a leading `docker://` is optional). It is the one image an action's `container-image` platform property may name: an action that names another is refused as invalid, one that names none gets this. A tag is refused. Needed with `--executor js-agent`
 # executor-base-image = "IMAGE"
-# The frontend's cache of the release's kbf base tree: a directory the frontend may write (the user the frontend runs as). The release's `SHA256SUMS` and its `kbf-base-tree-<commit>-linux-<arch>.tree.tar` bundle of `--executor-arch` are kept in `<DIR>/<commit>/`; when `<DIR>` holds neither that nor the same two files loose (copied by hand, as an earlier release asked), the frontend fetches them from the release (`--executor-base-tree-url`), checks the bundle against the release's `SHA256SUMS` and only then puts them in the cache, keeping the newest older releases for a rollback (`--executor-base-tree-keep`). It then writes the objects of the kbf base tree that the pack store lacks to `cas/l/`, create-only, so the pack store credentials must be allowed to write there, and records the tree as `job-tree/<digest>` in `--state-store` if there is one. A bundle that cannot be had, is not listed or not the listed bytes, or a write that fails, fails the start, naming this flag. Needed with `--executor js-agent`; with `--executor kbf-daemon` nothing is read, fetched or written
+# The frontend's cache of the release's kbf base tree: a directory the frontend may write (the user the frontend runs as). The release's `SHA256SUMS` and its `kbf-base-tree-<commit>-linux-<arch>.tree.tar` bundle of `--executor-arch` are kept in `<DIR>/<commit>/`; when `<DIR>` holds neither that nor the same two files loose (copied by hand, as an earlier release asked), the frontend fetches them from the release (`--executor-base-tree-url`), checks the bundle against the release's `SHA256SUMS` and only then puts them in the cache, keeping the newest older releases for a rollback (`--executor-base-tree-keep`). It then writes the objects of the kbf base tree that the pack store lacks to `cas/l/`, create-only, so the pack store credentials must be allowed to write there, and records the tree as `job-tree/<digest>` in `--state-store` if there is one. A bundle that cannot be had, is not listed or not the listed bytes, or a write that fails, fails the start, naming this flag. Needed with `--executor js-agent`; without it nothing is read, fetched or written
 # executor-base-tree = "DIR"
 # How many releases besides the running one stay in the `--executor-base-tree` cache after a fetch, for a rollback of the frontend: the newest fetched. 0 keeps none. Used only with `--executor js-agent`
 executor-base-tree-keep = 1
@@ -89,7 +89,7 @@ executor-insecure-argv-secrets = false
 # executor-kbf-image = "IMAGE"
 # How long the liveness row of a frontend lives after its last renewal, on the state store's clock, with `--executor-ownership shared`: at least the fence time (40 s) and 5 s. Used only with `--executor js-agent`
 executor-live-secs = 45
-# Has the task tool ask the read listener where each input is kept (`GET /locate`). The answer names no store and no grant (tierstore v0.3.29 removed the store read grants), so the task still reads every input through the listener, as without the flag; every byte is checked against its digest. Off by default. Used only with `--executor js-agent`, and refused with `--executor kbf-daemon`
+# Has the task tool ask the read listener where each input is kept (`GET /locate`). The answer names no store and no grant (tierstore v0.3.29 removed the store read grants), so the task still reads every input through the listener, as without the flag; every byte is checked against its digest. Off by default. Used only with `--executor js-agent`, and refused without it
 executor-locate = false
 # How many virtual workers stand for the job service's Macs, each of the shape of `--executor-host-*`, reporting `os=macos` and `arch=arm64`: the farm places an action whose platform asks for macOS on them, and each becomes a job of a Mac's native runtime that runs `--executor-mac-task-bundle`. 0, the default, registers none, and the farm places no macOS action on this executor. Needs `--executor-mac-task-bundle`. Used only with `--executor js-agent`
 executor-mac-hosts = 0
@@ -113,7 +113,7 @@ executor-prepare-concurrency = 4
 executor-prepare-limit-secs = 300
 # What a job's wall limit adds to the action's timeout, in seconds: the fetch of the inputs and the upload of the pack. An action that fetches or uploads for longer than this ends at the wall limit and is answered to the caller as a timeout. Used only with `--executor js-agent`
 executor-run-margin-secs = 300
-# How the secrets of a task (the presigned write url, the read token) reach it. `argv`, the default, passes them as arguments of the job and needs `--executor-insecure-argv-secrets`. `files` passes each as a file of the job, which its host writes read-only at `/run/js-files`: no argument holds a secret, and `--executor-insecure-argv-secrets` is refused with it; a host whose agent cannot write files refuses to start the job, and the farm runs the action again. `files` is refused with `--executor kbf-daemon`, which builds no command line
+# How the secrets of a task (the presigned write url, the read token) reach it. `argv`, the default, passes them as arguments of the job and needs `--executor-insecure-argv-secrets`. `files` passes each as a file of the job, which its host writes read-only at `/run/js-files`: no argument holds a secret, and `--executor-insecure-argv-secrets` is refused with it; a host whose agent cannot write files refuses to start the job, and the farm runs the action again. `files` is refused without `--executor js-agent`, which builds the command line
 executor-secret-delivery = "argv"
 # Where the task tool works in the container, if not in its own default: the kbf image must have a writable directory there. Used only with `--executor js-agent`
 # executor-work-dir = "DIR"
@@ -219,9 +219,9 @@ reapi-max-streams = 10000
 shutdown-timeout-secs = 0
 # How often, in seconds, a TLS listener looks at its certificate, key and client CA files (the `--*-tls-cert`, `--*-tls-key` and `--*-client-ca` flags). A change is applied to the next TLS handshake, with no restart and without ending a connection already open: renew a certificate by replacing the files. Files that do not make a working configuration (unreadable, not PEM, a key that is not the certificate's, an expired certificate, a renewal caught between its two writes) are logged and counted in `kbf_tls_reloads_total{outcome="rejected"}`, and the previous files keep serving; the next look finds them whole and applies them. The files must be good at start
 tls-reload-interval-secs = 30
-# The `kbf.worker.v1` listener. Without mutual TLS (`--worker-tls-cert`, `--worker-tls-key`, `--worker-client-ca`) it serves plain text, on any address; off loopback the start line carries a warning. `kbf frontend` binds it only when it is given (a frontend with no daemons and no storage nodes serves none); every other mode binds 127.0.0.1:8981 when it is not
+# The worker listener: storage nodes' `Membership` calls and a host updater's node calls. Without mutual TLS (`--worker-tls-cert`, `--worker-tls-key`, `--worker-client-ca`) it serves plain text, on any address; off loopback the start line carries a warning. `kbf frontend` binds it only when it is given (a frontend with no storage nodes serves none); every other mode binds 127.0.0.1:8981 when it is not
 # worker-listen = "WORKER_LISTEN"
-# The most HTTP/2 streams one connection to the worker listener may have open: a daemon's persistent session stream and its short transfer streams. At least 1, at most 32767
+# The most HTTP/2 streams one connection to the worker listener may have open: a storage node's short unary calls. At least 1, at most 32767
 worker-max-streams = 200
 
 [log]
@@ -247,15 +247,15 @@ pack-bytes = 33554432
 # pack-cache-bytes = "BYTES"
 # A directory this process owns where the blobs read from packs are kept, one file each, checked by digest on every read; the least recently used are removed to stay within `--pack-cache-bytes`. Left out, nothing is kept
 # pack-cache-dir = "DIR"
-# How many blobs of each pack a daemon commits this frontend reads back from the pack store and checks against their digests before it records the pack, spread over the pack from a start that its name picks (the same commit is always checked at the same blobs). A pack with fewer blobs is checked whole, and 16384, the most blobs a pack holds, checks every blob. 0 checks no blob and trusts the daemon: a blob that is not its digest is then caught only when it is first read. The last byte of the pack is read in any case, so a pack that is not stored is always refused. Used only with `--pack-store-endpoint`
-pack-commit-sample = 2
+# Retired: no longer read, a worker's committed pack is no longer taken. Accepted and ignored for one release
+# pack-commit-sample = "BLOBS"
 # The most bytes of client uploads into packs this frontend holds in flight at once, at least 67108864 (the largest blob that is packed, so that no upload is refused for its size) and at most 4294967295. Each upload takes its blob's size as soon as its resource name has arrived, before it reads on, and gives it back when it ends; one that finds the rest taken waits its turn, so a burst of uploads is slowed down, not failed. The bound counts blob bytes, not the memory of the process: a batch upload is decoded before it waits, so the bytes it holds meanwhile are not counted, and reads are not counted. Used only with `--pack-store-endpoint`
 pack-inflight-bytes = 1073741824
 # The bucket of `--pack-store-endpoint` that holds the packs, under the keys `cas/f/<--pack-writer>/<start>/<sequence>`
 # pack-store-bucket = "BUCKET"
 # A file with the key pair for `--pack-store-endpoint`, as JSON `{"access_key_id": "...", "secret_access_key": "..."}`, readable by its owner alone (mode 0600 or 0400). The secret is never a flag: a command line is world-readable
 # pack-store-credentials-file = "PATH"
-# Keeps the blobs clients upload in packs (many blobs in one object) in this S3-compatible object store, as `http://host:port`: a pack is written with a create-only request and recorded in the pack index before the upload is acknowledged, and a read asks the index first and fetches only the blob's bytes from its pack. A blob the index lacks is read from the storage nodes as before, and a blob over 64 MiB and any compressed blob still go to them. At start the frontend checks that the store refuses to replace an object and does not serve if it does not. Needs `--pack-index`, `--pack-store-bucket` and `--pack-store-credentials-file`. Daemons read blobs from the storage nodes only, so a farm must not enable this before they can read a blob that is only in a pack. Left out, no pack store is built or contacted and blobs go where they always did
+# Keeps the blobs clients upload in packs (many blobs in one object) in this S3-compatible object store, as `http://host:port`: a pack is written with a create-only request and recorded in the pack index before the upload is acknowledged, and a read asks the index first and fetches only the blob's bytes from its pack. A blob the index lacks is read from the storage nodes as before, and a blob over 64 MiB and any compressed blob still go to them. At start the frontend checks that the store refuses to replace an object and does not serve if it does not. Needs `--pack-index`, `--pack-store-bucket` and `--pack-store-credentials-file`. Workers read blobs from the storage nodes only, so a farm must not enable this before they can read a blob that is only in a pack. Left out, no pack store is built or contacted and blobs go where they always did
 # pack-store-endpoint = "URL"
 # The region the requests to `--pack-store-endpoint` are signed for
 pack-store-region = "us-east-1"
@@ -271,8 +271,8 @@ default-platform = "linux/x86_64"
 exclusive-actions = false
 # How long, in seconds, a finished operation is kept after its callers are answered. Within it, WaitExecution on the operation's name streams its result (a client whose Execute stream broke gets a result the action cache does not keep, such as a failure); after it, the name is NOT_FOUND. Every operation finished within it is held in memory
 finished-retention-secs = 60
-# The heartbeat interval daemons are asked for, in milliseconds, at most half the window in which a daemon may act on a `Start` (each `Start` names the newest heartbeat the server took, so a longer interval would leave it too little)
-heartbeat-interval-ms = 5000
+# Retired: no longer read, the worker session was removed. Accepted and ignored for one release
+# heartbeat-interval-ms = "MILLISECONDS"
 # Opens the pack index at start: the tables in the Postgres state store that say which pack holds each blob and where. A frontend given `--pack-store-endpoint` reads and writes them; without it nothing does, and the flag only checks that the store can hold them. Needs `--state-store` as a `postgres://` URL whose schema has the pack tables (`kbf-installer setup` makes them); a `sqlite://` store is refused. Left out, no pack table is touched
 pack-index = false
 # Whether placement reads the load the nodes report. `off`, the default, books by the CPUs a lease asks for, as the server always has, and reads no load. `on` admits and ranks nodes by the load they report and the load a lease is predicted to add; a node that reports none is charged by prediction alone, and a node that has never sent a reading the server accepted is charged at least 1000 m for each lease (the node's whole CPU capacity, if that is less), so a prediction under one core changes nothing for such a node. `on` also keeps the flat memory charged to a node's leases within the node's memory; that guard counts only leases that carry a memory (a retry up the memory ladder, a VM) unless `--placement-predictions on` gives leases one
@@ -289,18 +289,18 @@ readyz-probe-interval-ms = 1000
 readyz-store-timeout-ms = 2000
 # Which core drives the farm's scheduling. The one value is `legacy`, the default: the driver the server has always had. `js` names a core that was removed, because scheduling runs in the job service, and is refused at start (exit status 2). The core a server runs is logged at start and exported as `kbf_scheduler_core{core}`, the one series `kbf_scheduler_core{core="legacy"} 1`
 scheduler-core = "legacy"
-# Where the scheduler keeps its state, written before each change is acknowledged and replayed at start: `postgres:///kbf?host=/run/postgresql`, the database `kbf` on a local Unix socket, reached as this process's own user (peer authentication; a URL with a password is refused, as the command line is world-readable). The server must flush commits before it acknowledges them (`synchronous_commit` on) or the start is refused; the tables are created if missing. Or `sqlite:///absolute/path`, a file on a local disk that this process owns (created, with its directory, if missing: 0600, and 0700 for a directory it makes; a second frontend on it refuses to start); SQLite is removed in the next release, so a start on it logs a warning (see the upgrade notes). A start keeps the epoch the store holds, so daemons that reconnect keep the runs of the leases they hold; an operator raises it with `kbf cluster epoch-bump`, after a restore from a backup. `kbf frontend` refuses to start without it; left out of `kbf-server`, the scheduler's state is in memory and a restart loses it
+# Where the scheduler keeps its state, written before each change is acknowledged and replayed at start: `postgres:///kbf?host=/run/postgresql`, the database `kbf` on a local Unix socket, reached as this process's own user (peer authentication; a URL with a password is refused, as the command line is world-readable). The server must flush commits before it acknowledges them (`synchronous_commit` on) or the start is refused; the tables are created if missing. Or `sqlite:///absolute/path`, a file on a local disk that this process owns (created, with its directory, if missing: 0600, and 0700 for a directory it makes; a second frontend on it refuses to start); SQLite is removed in the next release, so a start on it logs a warning (see the upgrade notes). A start keeps the epoch the store holds, so workers that reconnect keep the runs of the leases they hold; an operator raises it with `kbf cluster epoch-bump`, after a restore from a backup. `kbf frontend` refuses to start without it; left out of `kbf-server`, the scheduler's state is in memory and a restart loses it
 # state-store = "URI"
 # How long, in seconds, the start waits for a Postgres `--state-store` that is not up yet (connection refused or reset, a Unix socket that does not exist yet, a connect that times out, or the server answering that it is starting up), trying again after 250 ms and then after twice as long each time, up to 10 s. The window is the time spent waiting between attempts; the time inside an attempt (a connect that times out) is not counted, so the whole wait can be longer. A store that refuses (a URL that does not parse, a login, a missing database, a schema this build does not accept) is not waited for: the frontend exits 2 at once. If the window is used up with the store still not up, the frontend exits 1, not 2, so that a unit which restarts on failure and prevents a restart on exit 2 starts it again. 0 does not wait, and exits 2 as it did before this flag. At most 3600.
 state-store-wait-secs = 300
-# How long, in seconds, queued work waits while no connected daemon can run it (none satisfies its platform, or none that does is large enough) before it is refused FAILED_PRECONDITION. The wait restarts whenever one can
+# How long, in seconds, queued work waits while no connected worker can run it (none satisfies its platform, or none that does is large enough) before it is refused FAILED_PRECONDITION. The wait restarts whenever one can
 unservable-wait-secs = 300
 # Whether the farm learns what its leases use. Only `off`, the default, is accepted: it learns nothing and writes no row. `record` and `on` were run by the js scheduler core, which was removed because scheduling runs in the job service, and a start given one is refused (exit status 2). The mode a server runs is logged at start as `usage profiles: <mode>` and exported as the gauge `kbf_usage_profiles_mode{mode}`, 1 for the mode and 0 for the others
 usage-profiles = "off"
-# The cores a node that reports VM slots (`vm.slots`) keeps for the host itself: subtracted from the CPUs placement may book on it, so that guests cannot take the host's own share. A node that reports none books the whole machine
-vm-host-floor-cpus = 2
-# The memory, in GiB, a node that reports VM slots (`vm.slots`) keeps for the host itself, subtracted as `--vm-host-floor-cpus` subtracts cores
-vm-host-floor-mem-gib = 8
+# Retired: no longer read, the worker session was removed. Accepted and ignored for one release
+# vm-host-floor-cpus = "CPUS"
+# Retired: no longer read, the worker session was removed. Accepted and ignored for one release
+# vm-host-floor-mem-gib = "GIB"
 # Lets a reservation start on the last worker an older ordinary request that waits could run on. Off, the request waits for another worker, so a whole-machine request never takes the only worker such a request has
 whole-node-allow-last-capable = false
 # How long, in seconds, a whole-machine request waits before it reserves a worker; until then it takes only a worker with no lease. 0, the default, reserves at once
@@ -411,7 +411,7 @@ task-put-retry-secs = 60
 task-url-slack-secs = 600
 
 [tls]
-# A file holding the token operator API writes (cordon, drain, uncordon) must present as `Authorization: Bearer <token>`. It must be owned by the server's user with mode 0600 or 0400, or the server refuses to start; run the server as a user other than the daemon's, whose builds could read it. Without it, writes are refused
+# A file holding the token operator API writes (cordon, drain, uncordon) must present as `Authorization: Bearer <token>`. It must be owned by the server's user with mode 0600 or 0400, or the server refuses to start; run the server as a user other than the worker's, whose builds could read it. Without it, writes are refused
 # api-token-file = "API_TOKEN_FILE"
 # A file holding the per-boot secret of the TLS-terminating proxy in front of this server (`docs/design/frontend-proxy.md`, section 3): exactly 32 bytes, owned by the server's user with mode 0600 or 0400, read at start. The proxy presents them as 64 lower-case hex digits in `x-kbf-proxy-auth`. With it, the REAPI, worker and operator listeners take calls from loopback only, and believe `x-kbf-node-id` and `x-kbf-role` only from a call that presents the secret; every other `x-kbf-*` header is dropped. The worker listener then takes the proxy's identity in place of a client certificate (it needs no TLS flags), and the operator API's writes must come through the proxy as well as carry the token (a local `curl` write is refused). The storage listener is not covered: it keeps its own mutual TLS. Without it, behavior is as before
 # proxy-auth-file = "PATH"
@@ -421,9 +421,9 @@ task-url-slack-secs = 600
 # reapi-tls-cert = "REAPI_TLS_CERT"
 # PEM private key of the REAPI listener; it must match `--reapi-tls-cert`, or the server refuses to start
 # reapi-tls-key = "REAPI_TLS_KEY"
-# PEM CA that client certificates must chain to. Each must also name the role the method it calls takes: the daemon role (`urn:kbf:role:daemon`) for the worker session and blob calls, the storage role (`urn:kbf:role:storage`) for `kbf.map.v1.Membership`, with DNS or IP names that cover the host of the instance id and of the address it registers; a frontend certificate may call nothing here
+# PEM CA that client certificates must chain to. Each must also name the role the method it calls takes: the storage role (`urn:kbf:role:storage`) for `kbf.map.v1.Membership` and the cold store's `GetStoreConfig`, with DNS or IP names that cover the host of the instance id and of the address it registers; a frontend certificate may call nothing here
 # worker-client-ca = "WORKER_CLIENT_CA"
-# The worker listener's deny list: certificate serials, public keys and node ids it refuses (format in the `identity` module docs). Read at start, then again at every check (a daemon's `Hello`, `Heartbeat`, `Result`, `NodeStatus` and blob calls, a storage node's `Register` and `Heartbeat`), so an edit takes effect without a restart. A `node` entry also refuses a storage certificate with that DNS name. A list that cannot be read after start refuses all of those calls. Needs mutual TLS, or `--proxy-auth-file` (then only `node` entries can name a caller: the proxy forwards a node id, not a certificate, so a `serial` or `spki-sha256` entry never matches)
+# The worker listener's deny list: certificate serials, public keys and node ids it refuses (format in the `identity` module docs). Read at start, then again at every check (a storage node's `Register` and `Heartbeat`), so an edit takes effect without a restart. A `node` entry also refuses a storage certificate with that DNS name. A list that cannot be read after start refuses all of those calls. Needs mutual TLS, or `--proxy-auth-file` (then only `node` entries can name a caller: the proxy forwards a node id, not a certificate, so a `serial` or `spki-sha256` entry never matches)
 # worker-deny-list = "WORKER_DENY_LIST"
 # PEM certificate of the worker listener. With `--worker-tls-key` and `--worker-client-ca` it serves mutual TLS; without all three, plain text
 # worker-tls-cert = "WORKER_TLS_CERT"

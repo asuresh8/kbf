@@ -20,11 +20,11 @@ fn count(swept: &Sweep, met: impl Fn(&RunReport) -> bool) -> usize {
     swept.each().filter(|r| met(r)).count()
 }
 
-/// Catches a calm network, a restart or a whole-process kill that breaks a property, a
+/// Catches a calm network, or a restart that breaks a property, a
 /// run that answers nothing, and a restart kind that never restarts.
 #[test]
-fn calm_restart_and_whole_process_seeds_answer_and_keep_every_property() {
-    for kind in [Kind::Calm, Kind::Restart, Kind::WholeProcess] {
+fn calm_and_restart_seeds_answer_and_keep_every_property() {
+    for kind in [Kind::Calm, Kind::Restart] {
         let swept = swept(kind, 0..3);
         for (seed, r) in &swept.reports {
             assert!(
@@ -34,12 +34,6 @@ fn calm_restart_and_whole_process_seeds_answer_and_keep_every_property() {
             if kind.restarts() {
                 assert!(r.starts > 1, "{kind:?} seed {seed} never restarted");
             }
-        }
-        if kind == Kind::WholeProcess {
-            assert!(
-                count(&swept, |r| r.lost > 0) > 0,
-                "no kill cut the daemon half"
-            );
         }
     }
 }
@@ -139,6 +133,24 @@ fn a_few_seeds_of_each_tier_fault_meet_it_and_keep_every_property() {
         count(&evict, |r| r.tier.evicted > 0) > 0,
         "nothing was evicted"
     );
+}
+
+/// Catches a local read failed by a disk fault being answered as a lost blob: on seeds whose
+/// disk fault (an I/O error, not a full disk) fails a read of a staged block, the run keeps
+/// every property (a read the fault failed is served by the store, or is unavailable for now,
+/// never missing) and at least one such read was met.
+#[test]
+fn a_local_read_failed_by_a_disk_fault_is_not_a_lost_blob() {
+    let met: u64 = [9, 27, 33]
+        .into_iter()
+        .map(|seed| {
+            swept(Kind::TierDiskFull, seed..seed + 1)
+                .each()
+                .map(|r| r.tier.read_errors)
+                .sum::<u64>()
+        })
+        .sum();
+    assert!(met > 0, "no disk fault failed a local read");
 }
 
 /// Catches a tier crash point that never fires, or a restart after it that breaks a

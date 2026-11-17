@@ -32,18 +32,18 @@ use crate::stamp::Stamp;
 #[derive(Debug)]
 pub(in crate::farm) struct Link {
     pub stream: StreamId,
-    /// The daemon process that opened it.
+    /// The worker process that opened it.
     pub instance: DaemonInstance,
     pub outbound: Outbound,
     /// The seq of the newest heartbeat taken on the stream; 0 before the first. Each
-    /// `Start` names it, and the daemon acts on the `Start` only within
+    /// `Start` names it, and the worker acts on the `Start` only within
     /// `START_VALIDITY` of having sent that heartbeat (or, for 0, its `Hello`).
     pub newest_beat: u64,
     /// The `os` and `arch` its newest `Hello` reported (empty if it named none).
     pub os: String,
     pub arch: &'static str,
     /// The version `Welcome` named for its first `Hello`: the lesser of the `Hello`'s and
-    /// the server's newest (`None` if the `Hello` named none). Like the link, it is the newest stream's: a daemon that returns on
+    /// the server's newest (`None` if the `Hello` named none). Like the link, it is the newest stream's: a worker that returns on
     /// another version replaces it, and a `Hello` resent on the stream does not.
     pub protocol: Option<u32>,
 }
@@ -83,18 +83,6 @@ pub(in crate::farm) struct Side {
     /// hold, shown what the state store says of it at each intake poll while a ticket holds
     /// the channel ([`State::stored_ticket`](super::State::stored_ticket)).
     pub watched: BTreeMap<OperationId, watch::Sender<Stage>>,
-    /// The pack-read counts on the newest heartbeat of each node that sent any
-    /// ([`Farm::note_pack_reads`](super::Farm::note_pack_reads)).
-    pub pack_reads: BTreeMap<WorkerId, worker::PackReadCounts>,
-    /// The pack-write counts on the newest heartbeat of each node that sent any
-    /// ([`Farm::note_pack_writes`](super::Farm::note_pack_writes)).
-    pub pack_writes: BTreeMap<WorkerId, worker::PackWriteCounts>,
-    /// The input cache counts on the newest heartbeat of each node that sent any
-    /// ([`Farm::note_input_cache`](super::Farm::note_input_cache)).
-    pub input_caches: BTreeMap<WorkerId, worker::InputCacheCounts>,
-    /// What the accepted node-load readings of each node that sent any come to
-    /// ([`Farm::note_node_load`](super::Farm::note_node_load)).
-    pub node_loads: super::node_load::NodeLoads,
     /// The operations this process settled as failed, per class
     /// (`kbf_execute_failed_actions_total`, [`Farm::failed_actions`](super::Farm::failed_actions)).
     pub failed: FailedActions,
@@ -114,10 +102,6 @@ impl Side {
             parked: BTreeMap::new(),
             learned: Learned::new(crate::learned::LearnedSizes::Off, 0, 0),
             watched: BTreeMap::new(),
-            pack_reads: BTreeMap::new(),
-            pack_writes: BTreeMap::new(),
-            input_caches: BTreeMap::new(),
-            node_loads: BTreeMap::new(),
             failed: FailedActions::default(),
         }
     }
@@ -237,7 +221,7 @@ impl Adapter for Side {
             grant.lease,
             &grant.worker,
         );
-        // The key joins the daemon's `lease phases:` line (`lease=`) to the action, also
+        // The key joins the worker's `lease phases:` line (`lease=`) to the action, also
         // for a lease whose result is never taken (cancelled).
         let first = self.first_waiter(view.sched, grant.operation);
         let key = first.map(|(_, w)| tracing::field::display(w.usage.key));
@@ -259,7 +243,7 @@ impl Adapter for Side {
 
     /// Sends the `Start` of a committed lease and marks its callers executing. The
     /// `Start` names the newest heartbeat taken on the worker's stream and the window
-    /// after it in which the daemon may still act on the `Start` (issue #23).
+    /// after it in which the worker may still act on the `Start` (issue #23).
     fn start(&mut self, view: &View<'_>, start: &StartLease) {
         // Its callers are shown executing before the `Start` leaves: a stream that reads
         // the stage later never sees an operation that has a `Start` in flight as one

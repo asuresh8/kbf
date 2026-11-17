@@ -356,7 +356,7 @@ impl Rig {
             host,
             allowlist: dir.join("releases.toml"),
             units: vec![
-                Unit::service("kbf-daemon.service").unwrap(),
+                Unit::service("kbf-storage.service").unwrap(),
                 Unit::service("kbf-frontend@a.service").unwrap(),
             ],
             restart_wait: Wait {
@@ -503,8 +503,8 @@ fn a_switch_puts_the_release_on_trial_and_restarts_the_units() {
     assert_eq!(
         rig.systemctl(),
         [
-            "restart -- kbf-daemon.service",
-            "is-active -- kbf-daemon.service",
+            "restart -- kbf-storage.service",
+            "is-active -- kbf-storage.service",
             "restart -- kbf-frontend@a.service",
             "is-active -- kbf-frontend@a.service"
         ]
@@ -570,6 +570,55 @@ fn the_installers_refusals_are_the_switchs_failures() {
     assert!(rig.systemctl().is_empty());
 }
 
+/// The window of a swap on trial is armed at the swap: its deadline is the one given and the
+/// count of starts is dropped, so the update of this socket owns the revert. With nothing on
+/// trial, or no state at all, arming changes nothing and fails nothing.
+///
+/// Catches: a trial left on the installer's start count, whose deadline never counts from the
+/// swap; an arm that writes a state for a host with none, or invents a trial.
+#[test]
+fn arming_sets_the_deadline_of_a_trial_and_leaves_a_host_without_one_alone() {
+    let rig = Rig::new("arm");
+    rig.stage().unwrap();
+    assert_eq!(rig.backend.switch(COMMIT, 600, 1_000).unwrap(), 1_600);
+    let pending = rig.state().pending_confirm.unwrap();
+    assert_eq!(
+        (pending.deadline_wall, pending.starts_left),
+        (Some(1_600), None)
+    );
+    rig.backend.arm(2_000).unwrap();
+    let pending = rig.state().pending_confirm.unwrap();
+    assert_eq!(pending.deadline_wall, Some(2_000));
+
+    let calm = Rig::new("arm-calm");
+    calm.backend.arm(2_000).unwrap();
+    assert!(calm.state().pending_confirm.is_none());
+    assert_eq!(calm.state().current.unwrap().to_string(), A);
+
+    // A state that is gone from a host that was provisioned is a failed switch, not a guess.
+    let lost = Rig::new("arm-lost");
+    for file in [lost.layout.state_file(), lost.layout.state_backup()] {
+        let _ = fs::remove_file(lost.layout.join(&file));
+    }
+    let fault = lost.backend.arm(2_000).unwrap_err();
+    assert_eq!(fault.code, Code::SwitchFailed, "{fault:?}");
+    assert!(fault.detail.contains("unusable"), "{fault:?}");
+
+    // A host never provisioned (no state, no link) has nothing to arm.
+    let bare = Rig::new("arm-bare");
+    for file in [bare.layout.state_file(), bare.layout.state_backup()] {
+        let _ = fs::remove_file(bare.layout.join(&file));
+    }
+    for entry in fs::read_dir(bare.releases()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_symlink() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    bare.backend.arm(2_000).unwrap();
+    assert!(state::read_unlocked(&bare.layout).unwrap().is_none());
+}
+
 /// A confirm clears the marker and keeps the release; a revert puts the links and the state back
 /// on the release that ran and restarts the units on it, needing nothing of the release on trial;
 /// a revert when the units will not start says so, with the host back.
@@ -616,7 +665,7 @@ fn a_confirm_keeps_the_release_and_a_revert_goes_back_and_restarts() {
     rig.net
         .borrow_mut()
         .restart_fails
-        .insert("kbf-daemon.service".to_owned());
+        .insert("kbf-storage.service".to_owned());
     let pending = rig.backend.pending().unwrap().unwrap();
     let fault = rig.backend.revert(&pending).unwrap_err();
     assert_eq!(fault.code, Code::RevertFailed);
@@ -651,15 +700,7 @@ fn a_trial_armed_with_no_deadline_has_none() {
         commit: CommitId::new(COMMIT).unwrap(),
         order_id: "7-1".into(),
     };
-    activate::activate(
-        &mut *exec,
-        &rig.layout,
-        &order,
-        activate::Arm::FromFirstStart { starts: 3 },
-        1,
-        &mut Vec::new(),
-    )
-    .unwrap();
+    activate::activate(&mut *exec, &rig.layout, &order, 3, &mut Vec::new()).unwrap();
     drop(exec);
     let pending = rig.backend.pending().unwrap().unwrap();
     assert_eq!(pending.deadline_unix, None);
@@ -769,7 +810,7 @@ fn a_unit_that_fails_on_b_and_not_on_a_leaves_the_host_on_a() {
     rig.net
         .borrow_mut()
         .restart_fails_once
-        .insert("kbf-daemon.service".to_owned());
+        .insert("kbf-storage.service".to_owned());
     let fault = rig.backend.switch(COMMIT, 600, 1_000).unwrap_err();
     assert_eq!(
         (fault.code, fault.refused),
@@ -814,7 +855,7 @@ fn a_release_directory_without_a_binary_file_is_not_laid_out() {
 /// the channels file, the programs of a stage, and no lease waited for.
 #[test]
 fn the_production_host_is_the_installers_layout_and_the_programs_of_a_stage() {
-    let host = super::linux::production(vec![Unit::service("kbf-daemon.service").unwrap()]);
+    let host = super::linux::production(vec![Unit::service("kbf-storage.service").unwrap()]);
     assert_eq!(
         host.allowlist,
         Path::new("/etc/kbf/host-install-releases.toml")
@@ -829,8 +870,6 @@ fn the_production_host_is_the_installers_layout_and_the_programs_of_a_stage() {
     assert_eq!(tools.curl, Path::new("/usr/bin/curl"));
     assert_eq!(tools.tarball_max, 512 * 1024 * 1024);
     assert_eq!(host.tools.download, tools.download);
-    use kbf_installer::helper::leases::LeaseSource;
-    assert_eq!(super::linux::NoLeases.live(), Ok(0));
 }
 
 #[path = "linux_image_tests.rs"]

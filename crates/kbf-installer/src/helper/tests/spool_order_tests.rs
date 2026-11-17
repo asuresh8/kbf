@@ -138,7 +138,6 @@ fn a_record_expires_by_roots_first_seen_time_not_the_files() {
     // A record root first sees at T1 and is still in the spool 1801 s later (here: the
     // installer was held, so it was seen but not taken) is expired.
     let mut rig = Rig::new("expiry-stale");
-    rig.leases.set(0);
     rig.put(&rig.rec(5, 1, 1, Verb::Activate, B));
     let memory_path = rig.root.join("var/lib/kbf-installer/helper.json");
     // Root has seen it at T0 - 1801 already (as a persisted first-seen time).
@@ -177,31 +176,32 @@ fn an_order_for_another_platform_is_refused_before_the_fetch() {
     assert!(rig.refusal().contains("platform"), "{}", rig.refusal());
 }
 
-/// Catches a status.json the node cannot read in a state the helper reports: what the helper
-/// writes is what `kbf-update` reads, with the facts of the fetched release.
+/// Catches a status.json the strict reader cannot read in a state the helper reports, with the
+/// facts of the fetched release.
 #[test]
-fn status_json_is_read_by_the_node_client() {
+fn status_json_is_read_by_the_strict_reader() {
     let mut rig = Rig::new("status-contract");
     let status = rig.root.join(UPDATE).join("status.json");
-    let read = || kbf_update::helper::read(&status);
-    rig.cycle(T0);
-    let kbf_update::helper::Helper::Reported(idle) = read() else {
-        panic!("reported")
+    let read = || {
+        crate::status_v2::StatusV2::parse(&std::fs::read(&status).expect("status.json"))
+            .expect("the strict reader reads it")
     };
-    assert_eq!(idle.state, kbf_update::helper::HelperState::Idle);
-    assert_eq!(idle.installed.as_deref(), Some(A));
+    let id = |c: &Option<crate::CommitId>| c.as_ref().map(|c| c.as_str().to_owned());
+    rig.cycle(T0);
+    let idle = read();
+    assert_eq!(idle.state, crate::status_v2::Phase::Idle);
+    assert_eq!(id(&idle.installed_commit).as_deref(), Some(A));
     rig.order(5, Verb::Activate, B);
     rig.cycle(T0 + 6);
-    let kbf_update::helper::Helper::Reported(on_trial) = read() else {
-        panic!("reported")
-    };
+    let on_trial = read();
     assert_eq!(
         on_trial.state,
-        kbf_update::helper::HelperState::ActivatedUnconfirmed
+        crate::status_v2::Phase::ActivatedUnconfirmed
     );
     assert_eq!(on_trial.acked_order_id, 5);
-    assert_eq!(on_trial.staged_facts.expect("facts").protocol, 7);
-    assert!(on_trial.holds(B) && on_trial.holds(A));
+    assert_eq!(on_trial.staged.expect("facts").protocol, 7);
+    assert_eq!(id(&on_trial.installed_commit).as_deref(), Some(B));
+    assert_eq!(id(&on_trial.previous_commit).as_deref(), Some(A));
 }
 
 /// Catches what the writer makes and the reader refuses disagreeing: the record
@@ -307,34 +307,6 @@ fn the_restart_is_one_fixed_command() {
             ]
         )
     );
-    assert_eq!(
-        program(Restart::Launchd("com.komira.kbf-daemon".to_owned())),
-        (
-            "/bin/launchctl".to_owned(),
-            vec![
-                "kickstart".to_owned(),
-                "-k".to_owned(),
-                "system/com.komira.kbf-daemon".to_owned()
-            ]
-        )
-    );
-}
-
-/// Catches a confirm window the order chooses: on macOS the window starts at the swap and
-/// the helper clamps the order's `window_s` to its own 120..=1800 seconds.
-///
-/// Catches: the clamp dropped; the bounds swapped.
-#[test]
-fn the_window_an_order_asks_for_is_clamped_on_macos() {
-    for (asked, kept) in [(5_u32, 120_u64), (600, 600), (99_999, 1800)] {
-        let mut rig = Rig::on(&format!("window-{asked}"), Platform::MacOs);
-        let mut r = rig.rec(5, 1, 1, Verb::Activate, B);
-        r.window_s = asked;
-        rig.put(&r);
-        rig.cycle(T0 + 3);
-        let pending = rig.state().pending_confirm.expect("on trial");
-        assert_eq!(pending.deadline_wall, Some(T0 + 3 + kept), "asked {asked}");
-    }
 }
 
 /// Catches orders taken in the order the directory lists them: three orders in one pass

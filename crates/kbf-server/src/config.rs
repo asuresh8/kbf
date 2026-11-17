@@ -18,7 +18,6 @@ use kbf_objstore::s3::{Credentials, S3Config, S3ConfigError, S3Store};
 use kbf_tls::{Alpn, TlsError, TlsFiles, TlsSource};
 
 use kbf_auth::{AllowAuthorizer, Authorizer, Policy, PolicyError};
-use kbf_front::SegmentsConfig;
 use kbf_meta::ServerId;
 use kbf_threads::disk::FreeSpace;
 
@@ -27,7 +26,6 @@ use crate::proxy_auth::{ProxySecret, ProxySecretError};
 use crate::serve::{Api, Behind, Listeners, StreamTiming, WorkerTls};
 use crate::stores::{S3Uri, StoreFlags, StoreUri, Stores, StoresError};
 use crate::token::{ApiToken, TokenFileError};
-use crate::worker::HostFloor;
 
 /// Where the worker listener is when `--worker-listen` is not given, in every mode but
 /// `kbf frontend` (which then has none).
@@ -59,10 +57,6 @@ pub struct Args {
     /// The roles to run.
     #[arg(long, value_enum, default_value = "all")]
     pub role: Role,
-    /// The node's one cache, when a daemon in this process shares the hot store's disk
-    /// (`kbf all-in-one`, `kbf_storage::local_cache`). No flag sets it.
-    #[arg(skip)]
-    pub local_cache: Option<Arc<kbf_storage::local_cache::LocalCache>>,
     /// The durable object store, where every blob ends up: `file:///absolute/path` (a
     /// directory, `kbf_objstore::FsStore`: locked while the server runs, a second
     /// server on it is refused; a write that would leave its filesystem with less free
@@ -79,7 +73,7 @@ pub struct Args {
     /// checked against the index by a start-up pass in the background; a lost or
     /// damaged object is also found when it is read, or before an action-cache hit
     /// that needs it is served (a miss). There is no `memory:` store:
-    /// a `file://` path on a tmpfs is one. A storage node (not `all-in-one`) may instead be
+    /// a `file://` path on a tmpfs is one. A storage node may instead be
     /// given the word `registered`: it holds no store of its own and, at each start, waits
     /// for the frontend's registration (`kbf cluster object-store`), then runs on the
     /// registered endpoint, bucket, prefix and keys, fetched over its storage certificate and
@@ -108,12 +102,12 @@ pub struct Args {
     /// (5% of its size, at least 1 GiB, and never more than half of what is free), at
     /// most `--hot-store-max-bytes`; at the budget, writes
     /// take the direct path to the cold store. Without it, uploads go straight to the
-    /// cold store. A daemon's outputs (a segment upload, or the in-process plane) and a
+    /// cold store. A worker's outputs (a segment upload) and a
     /// ByteStream Write over 16 MiB are written through to it as they arrive, so a
     /// large one is never held in memory.
-    /// Without it, or when it has no room, a daemon's blob over 16 MiB
+    /// Without it, or when it has no room, a blob over 16 MiB
     /// (`kbf_front::MAX_UNSTAGED_BLOB_BYTES`) is streamed to the cold store as it
-    /// arrives (a ByteStream Write, or the in-process plane's own stream), never held
+    /// arrives (a ByteStream Write), never held
     /// whole and never refused for its size.
     /// The metadata log lives in `<dir>/meta`, unless `--meta-dir` says otherwise.
     #[arg(long, value_name = "URI")]
@@ -208,11 +202,11 @@ pub struct Args {
     /// answers those calls itself.
     #[arg(long, value_name = "URL")]
     pub storage: Option<String>,
-    /// The `kbf.worker.v1` listener. Without mutual TLS (`--worker-tls-cert`,
-    /// `--worker-tls-key`, `--worker-client-ca`) it serves plain text, on any address;
-    /// off loopback the start line carries a warning. `kbf frontend` binds it only when it is
-    /// given (a frontend with no daemons and no storage nodes serves none); every other mode
-    /// binds 127.0.0.1:8981 when it is not.
+    /// The worker listener: storage nodes' `Membership` calls and a host updater's node calls.
+    /// Without mutual TLS (`--worker-tls-cert`, `--worker-tls-key`, `--worker-client-ca`) it
+    /// serves plain text, on any address; off loopback the start line carries a warning.
+    /// `kbf frontend` binds it only when it is given (a frontend with no storage nodes serves
+    /// none); every other mode binds 127.0.0.1:8981 when it is not.
     #[arg(long)]
     pub worker_listen: Option<SocketAddr>,
     /// The operator API listener (HTTP/JSON under `/v1`). Off unless given. Reads are
@@ -222,7 +216,7 @@ pub struct Args {
     /// A file holding the token operator API writes (cordon, drain, uncordon) must
     /// present as `Authorization: Bearer <token>`. It must be owned by the server's
     /// user with mode 0600 or 0400, or the server refuses to start; run the server as
-    /// a user other than the daemon's, whose builds could read it. Without it, writes
+    /// a user other than the worker's, whose builds could read it. Without it, writes
     /// are refused.
     #[arg(long, requires = "api_listen")]
     pub api_token_file: Option<PathBuf>,
@@ -263,16 +257,15 @@ pub struct Args {
     #[arg(long, requires_all = ["worker_tls_cert", "worker_client_ca"])]
     pub worker_tls_key: Option<PathBuf>,
     /// PEM CA that client certificates must chain to. Each must also name the role the
-    /// method it calls takes: the daemon role (`urn:kbf:role:daemon`) for the worker
-    /// session and blob calls, the storage role (`urn:kbf:role:storage`) for
-    /// `kbf.map.v1.Membership`, with DNS or IP names that cover the host of the instance
-    /// id and of the address it registers; a frontend certificate may call nothing here.
+    /// method it calls takes: the storage role (`urn:kbf:role:storage`) for
+    /// `kbf.map.v1.Membership` and the cold store's `GetStoreConfig`, with DNS or IP names
+    /// that cover the host of the instance id and of the address it registers; a frontend
+    /// certificate may call nothing here.
     #[arg(long, requires_all = ["worker_tls_cert", "worker_tls_key"])]
     pub worker_client_ca: Option<PathBuf>,
     /// The worker listener's deny list: certificate serials, public keys and node ids
     /// it refuses (format in the `identity` module docs). Read at start, then again at
-    /// every check (a daemon's `Hello`, `Heartbeat`, `Result`, `NodeStatus` and blob
-    /// calls, a storage node's `Register` and `Heartbeat`), so an edit takes effect
+    /// every check (a storage node's `Register` and `Heartbeat`), so an edit takes effect
     /// without a restart. A `node` entry also refuses a storage certificate with that DNS
     /// name. A list that cannot be read after start refuses all of those calls. Needs
     /// mutual TLS, or `--proxy-auth-file` (then only `node` entries can name a caller: the
@@ -306,16 +299,7 @@ pub struct Args {
         value_parser = clap::value_parser!(u64).range(1..=3600)
     )]
     pub tls_reload_interval_secs: u64,
-    /// The heartbeat interval daemons are asked for, in milliseconds, at most half the
-    /// window in which a daemon may act on a `Start` (each `Start` names the newest
-    /// heartbeat the server took, so a longer interval would leave it too little).
-    #[arg(
-        long,
-        default_value_t = 5_000,
-        value_parser = clap::value_parser!(u64).range(1..=MAX_HEARTBEAT_INTERVAL_MS)
-    )]
-    pub heartbeat_interval_ms: u64,
-    /// How long, in seconds, queued work waits while no connected daemon can run it
+    /// How long, in seconds, queued work waits while no connected worker can run it
     /// (none satisfies its platform, or none that does is large enough) before it is
     /// refused FAILED_PRECONDITION. The wait restarts whenever one can.
     #[arg(long, default_value_t = kbf_sched::UNSERVABLE_WAIT.as_secs())]
@@ -377,15 +361,6 @@ pub struct Args {
     /// action's: it runs again with the same booking, as it does without this flag
     #[arg(long)]
     pub no_memory_climb: bool,
-    /// The cores a node that reports VM slots (`vm.slots`) keeps for the host itself:
-    /// subtracted from the CPUs placement may book on it, so that guests cannot take the
-    /// host's own share. A node that reports none books the whole machine.
-    #[arg(long, default_value_t = 2)]
-    pub vm_host_floor_cpus: u64,
-    /// The memory, in GiB, a node that reports VM slots (`vm.slots`) keeps for the host
-    /// itself, subtracted as `--vm-host-floor-cpus` subtracts cores.
-    #[arg(long, default_value_t = 8)]
-    pub vm_host_floor_mem_gib: u64,
     /// What the farm does with `kbf-estimator`, which predicts an action's memory from
     /// what its earlier runs used. `off` calls it never. `shadow` shows it every attempt
     /// that finishes and logs, for every new operation, a `size estimate:` line with what
@@ -520,7 +495,7 @@ pub struct Args {
     /// Thread sizes: the overrides `--async-threads`, `--blocking-threads` and
     /// `--cpu-threads` (see `kbf_threads`). Left out, the server uses every CPU it may
     /// (the async workers and the CPU pool each one thread per logical CPU); it has no
-    /// `--reserve-cpus`, which is for the daemon. `--cpu-threads` is the most CPU-bound
+    /// `--reserve-cpus`, which is for the worker. `--cpu-threads` is the most CPU-bound
     /// jobs the server runs at once on the blocking pool, off the request workers: today the SHA-256 and CRC-32C of
     /// records, in the write tier's flusher before each PUT and, for an upload without
     /// a tier, as its ranges arrive.
@@ -544,11 +519,11 @@ pub struct Args {
     /// of them, without one). Not a limit on a blob's size: a segment held in memory
     /// holds no record over 16 MiB (`kbf_front::MAX_UNSTAGED_BLOB_BYTES`), and an upload
     /// with a larger one and no room on the hot store is answered FAILED_PRECONDITION,
-    /// so the daemon sends its records by ByteStream, which streams a large blob to the
+    /// so the worker sends its records by ByteStream, which streams a large blob to the
     /// cold store. Those ranges are held until the upload commits, admitted
     /// under `--write-bytes-in-flight` with every other upload: a `Begin` waits while
     /// that is spent. At least 33 MiB (`kbf_front::MIN_SEGMENT_UPLOAD_BYTES`), a
-    /// daemon's upload of small files with room to spare, and at most
+    /// worker's upload of small files with room to spare, and at most
     /// `--write-bytes-in-flight`, so any legal `Begin` can be admitted; the server
     /// refuses to start otherwise. At most `kbf_front::MAX_ADMISSION_BYTES`, the most
     /// one admission counts, so a `Begin` never holds more than it is counted for under
@@ -710,7 +685,7 @@ pub struct Args {
     /// a local disk that this process owns (created, with its directory, if missing: 0600,
     /// and 0700 for a directory it makes; a second frontend on it refuses to start); SQLite
     /// is removed in the next release, so a start on it logs a warning (see the upgrade
-    /// notes). A start keeps the epoch the store holds, so daemons that reconnect keep the
+    /// notes). A start keeps the epoch the store holds, so workers that reconnect keep the
     /// runs of the leases they hold; an operator raises it with `kbf cluster epoch-bump`,
     /// after a restore from a backup. `kbf frontend` refuses to start without it; left out
     /// of `kbf-server`, the scheduler's state is in memory and a restart loses it
@@ -743,6 +718,9 @@ pub struct Args {
     /// The retired release poller's and release store's flags: accepted, hidden, ignored.
     #[command(flatten)]
     pub retired_release: crate::retired::RetiredReleaseFlags,
+    /// The retired worker session's flags: accepted, hidden, ignored.
+    #[command(flatten)]
+    pub retired_worker: crate::retired::RetiredWorkerFlags,
     /// Serves the web UI on the operator API (`--api-listen`): read-only pages under `/ui`
     /// (`docs/design/kbf-ui-v1.md`). On by default; `--ui=false` turns it off, and `/ui` is
     /// then a `404`. The UI is open: it asks for no login or certificate, and it shows
@@ -816,8 +794,7 @@ pub enum ConfigError {
     ColdKeyFileOnRegistered,
     /// `--cold-store registered` on a server that is not a storage node.
     #[error(
-        "--cold-store registered is for a storage node (kbf storage, kbf storage-and-daemon, \
-         kbf node): it takes its store from the frontend's registration, and this server \
+        "--cold-store registered is for a storage node (kbf storage, kbf node): it takes its store from the frontend's registration, and this server \
          has no frontend to ask"
     )]
     ColdRegisteredNotHere,
@@ -1031,15 +1008,12 @@ impl Args {
             reapi_tls,
             worker: self.worker_listen.unwrap_or(DEFAULT_WORKER_LISTEN),
             worker_tls,
-            heartbeat_interval: Duration::from_millis(self.heartbeat_interval_ms),
-            hello_wait: Duration::from_secs(10),
             tick: Duration::from_secs(1),
             unservable_wait: Duration::from_secs(self.unservable_wait_secs),
             default_platform: self.default_platform,
             qos_allowed: self.qos_allowed,
             memory_ladder: kbf_sched::MemoryLadder::from_gib(&self.memory_ladder_gib)?,
             memory_climb: !self.no_memory_climb,
-            vm_host_floor: HostFloor::new(self.vm_host_floor_cpus, self.vm_host_floor_mem_gib),
             learned_sizes: self.learned_sizes,
             exclusive_actions: self.exclusive_actions,
             placement_load: self.placement_load,
@@ -1058,10 +1032,6 @@ impl Args {
             },
             store_probe_timeout: Duration::from_millis(self.readyz_store_timeout_ms),
             invocation_memory: usize::try_from(self.invocation_memory).unwrap_or(usize::MAX),
-            segments: SegmentsConfig {
-                max_bytes: self.segment_upload_max_bytes,
-                idle: Duration::from_secs(self.segment_upload_idle_secs),
-            },
             stream_limits: self.streams.limits(),
         })
     }
@@ -1170,12 +1140,7 @@ impl Args {
             .as_deref()
             .map(ApiToken::from_file)
             .transpose()?;
-        let local_cache = self.local_cache.clone();
-        Ok(Some(Api {
-            listen,
-            token,
-            local_cache,
-        }))
+        Ok(Some(Api { listen, token }))
     }
 
     /// How the cache groups and bounds uploads: `--write-linger`,

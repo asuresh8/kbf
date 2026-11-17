@@ -40,8 +40,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::contact::FENCE_AFTER;
 use futures::FutureExt as _;
-use kbf_daemon::FENCE_AFTER;
 use kbf_front::{Described, MetaLog};
 use kbf_log::FarmLogId;
 use kbf_meta::{
@@ -307,13 +307,6 @@ impl Server {
 
     pub(crate) fn take_outputs(&mut self) -> Vec<Output<Msg>> {
         std::mem::take(&mut self.out)
-    }
-
-    /// Whether the server's process is running (its log open, or stopped and
-    /// answering reads).
-    #[must_use]
-    pub fn is_up(&self) -> bool {
-        self.up.is_some()
     }
 
     /// The applied metadata state, while the server is up.

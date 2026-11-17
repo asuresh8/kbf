@@ -110,6 +110,28 @@ fn the_file_turns_the_memory_climb_off() {
     }
 }
 
+/// Catches a `kbf.toml` written from an earlier release's template no longer starting the
+/// frontend: the four flags of the removed worker session, which that template wrote as
+/// `[scheduler] heartbeat-interval-ms`, `vm-host-floor-cpus`, `vm-host-floor-mem-gib` and
+/// `[packs] pack-commit-sample`, are still read from those tables, into the retired flags
+/// that are accepted and ignored.
+#[test]
+fn the_retired_worker_session_keys_are_read_from_the_tables_an_earlier_template_wrote() {
+    let dir = scratch("retired_worker_keys");
+    let text = format!(
+        "{FRONTEND_FILE}\n[scheduler]\nheartbeat-interval-ms = 5000\nvm-host-floor-cpus = 2\n\
+         vm-host-floor-mem-gib = 8\n\n[packs]\npack-commit-sample = 2\n"
+    );
+    let path = file(&dir, &text, 0o600);
+    let parsed =
+        kbf_cli::parse_with(argv(&["kbf", "frontend"], Some(&path)), None).expect("parses");
+    let retired = &frontend(&parsed.invocation).server.retired_worker;
+    assert_eq!(retired.heartbeat_interval_ms.as_deref(), Some("5000"));
+    assert_eq!(retired.vm_host_floor_cpus.as_deref(), Some("2"));
+    assert_eq!(retired.vm_host_floor_mem_gib.as_deref(), Some("8"));
+    assert_eq!(retired.pack_commit_sample.as_deref(), Some("2"));
+}
+
 /// Catches a default config path that is ignored, or one that is required: `parse_with`
 /// reads the default file when it exists and goes on without it when it does not.
 #[test]
@@ -329,23 +351,16 @@ fn a_value_gets_the_validation_of_its_flag() {
 #[test]
 fn a_label_key_is_refused_with_its_replacement() {
     let dir = scratch("label-key");
-    let identity = "server = \"https://127.0.0.1:1\"\nca-cert = \"ca.pem\"\ncert = \"node.pem\"\nkey = \"node.key\"\nnode-id = \"n\"\n";
     for (body, key) in [
+        ("[listener]\nlabel = [\"a=b\"]\n", "`listener.label`"),
+        ("[log]\nlabel = [\"a=b\"]\n", "`log.label`"),
         (
-            format!("[identity]\n{identity}label = [\"a=b\"]\n\n[daemon]\ndriver = \"native\"\n"),
-            "`identity.label`",
-        ),
-        (
-            format!("[identity]\n{identity}\n[daemon]\ndriver = \"native\"\nlabel = [\"a=b\"]\n"),
-            "`daemon.label`",
-        ),
-        (
-            format!("label = [\"a=b\"]\n[identity]\n{identity}\n[daemon]\ndriver = \"native\"\n"),
+            "label = [\"a=b\"]\n[listener]\nlisten = \"127.0.0.1:1\"\n",
             "`label`",
         ),
     ] {
-        let path = file(&dir, &body, 0o600);
-        let err = kbf_cli::parse_with(argv(&["kbf", "daemon"], Some(&path)), None).expect_err(key);
+        let path = file(&dir, body, 0o600);
+        let err = kbf_cli::parse_with(argv(&["kbf", "storage"], Some(&path)), None).expect_err(key);
         assert_eq!(err.exit_code(), 2, "{key}");
         let msg = err.to_string();
         assert!(msg.contains(key), "{key}: {msg}");
@@ -433,30 +448,38 @@ fn the_output_disk_key_is_refused_naming_it() {
     );
 }
 
-/// Catches a repeatable flag read as one value, and a switch read as a value: `server`
-/// (given once per frontend on the command line) is an array in the file, and a switch is
-/// `true` to turn it on and `false` to leave it off, refused for anything else.
+/// Catches a repeatable flag read as one value, and a switch read as a value: `frontend-name`
+/// (given once per name on the command line) is an array in the file, and a switch is `true` to
+/// turn it on and `false` to leave it off, refused for anything else.
 #[test]
 fn a_repeatable_flag_is_an_array_and_a_switch_is_a_boolean() {
     let dir = scratch("shapes");
-    let node = "[identity]\nserver = [\"https://127.0.0.1:1\", \"https://farm.example:1\"]\nca-cert = \"ca.pem\"\ncert = \"node.pem\"\nkey = \"node.key\"\nnode-id = \"n\"\n\n[daemon]\ndriver = \"native\"\n";
-    let path = file(&dir, node, 0o600);
-    let parsed = kbf_cli::parse_with(argv(&["kbf", "daemon"], Some(&path)), None).expect("parses");
-    let text = format!("{:?}", parsed.invocation);
-    assert!(
-        text.contains(r#"["https://127.0.0.1:1", "https://farm.example:1"]"#),
-        "{text}"
-    );
-    // `no-input-cache` is a switch of the daemon.
+    // The enrollment service's flags need each other; `extra` is more lines of its table.
+    let text = |extra: &str| {
+        format!(
+            "{FRONTEND_FILE}[enroll-service]\nca-dir = \"/x\"\nca-dev-file-signer = true\n\
+             enroll-listen = \"127.0.0.1:1\"\n\
+             frontend-name = [\"a.example\", \"b.example\"]\n{extra}[scheduler]\nstate-store = \"sqlite:///x.db\"\n"
+        )
+    };
+    let parse = |text: &str| {
+        let path = file(&dir, text, 0o600);
+        kbf_cli::parse_with(argv(&["kbf", "frontend"], Some(&path)), None)
+    };
+    let parsed = parse(&text("")).expect("parses");
+    let shown = format!("{:?}", parsed.invocation);
+    assert!(shown.contains(r#"["a.example", "b.example"]"#), "{shown}");
     for (value, on) in [("true", true), ("false", false)] {
-        let path = file(&dir, &format!("{node}no-input-cache = {value}\n"), 0o600);
-        let parsed = kbf_cli::parse_with(argv(&["kbf", "daemon"], Some(&path)), None).expect(value);
-        let text = format!("{:?}", parsed.invocation);
-        assert_eq!(text.contains("no_input_cache: true"), on, "{value}: {text}");
+        let parsed =
+            parse(&text(&format!("enroll-allow-unenforced-deny = {value}\n"))).expect(value);
+        let shown = format!("{:?}", parsed.invocation);
+        assert_eq!(
+            shown.contains("allow_unenforced_deny: true"),
+            on,
+            "{value}: {shown}"
+        );
     }
-    let path = file(&dir, &format!("{node}no-input-cache = \"yes\"\n"), 0o600);
-    let err =
-        kbf_cli::parse_with(argv(&["kbf", "daemon"], Some(&path)), None).expect_err("not a bool");
+    let err = parse(&text("enroll-allow-unenforced-deny = \"yes\"\n")).expect_err("not a bool");
     assert!(err.to_string().contains("takes true or false"), "{err}");
 }
 
@@ -466,21 +489,10 @@ fn a_repeatable_flag_is_an_array_and_a_switch_is_a_boolean() {
 fn every_mode_takes_check_and_config() {
     let dir = scratch("every_mode");
     let path = file(&dir, "", 0o600);
-    let node = [
-        "--driver=container",
-        "--server=https://127.0.0.1:1",
-        "--ca-cert=ca.pem",
-        "--cert=node.pem",
-        "--key=node.key",
-        "--node-id=n",
-    ];
-    // `all-in-one` is refused before any file is read; binary.rs pins that.
-    for mode in names::MODES.iter().filter(|m| m.name != names::ALL_IN_ONE) {
+    for mode in names::MODES {
         let mut words = vec!["kbf", mode.name];
-        match mode.name {
-            names::FRONTEND => words.push("--storage=http://127.0.0.1:1"),
-            names::STORAGE => {}
-            _ => words.extend(node),
+        if mode.name == names::FRONTEND {
+            words.push("--storage=http://127.0.0.1:1");
         }
         let plain = kbf_cli::parse_with(argv(&words, Some(&path)), None).expect(mode.name);
         assert!(!plain.check, "{}", mode.name);
@@ -607,8 +619,8 @@ fn file_mode_reads_a_string_and_refuses_the_rest() {
             && why.contains(&path.display().to_string()),
         "{why}"
     );
-    let path = file(&dir, "mode = \"daemon\"\n", 0o600);
-    assert_eq!(config::file_mode(&path), Ok(Some("daemon".to_owned())));
+    let path = file(&dir, "mode = \"storage\"\n", 0o600);
+    assert_eq!(config::file_mode(&path), Ok(Some("storage".to_owned())));
     let path = file(&dir, "[node]\nid = \"a\"\n", 0o600);
     assert_eq!(config::file_mode(&path), Ok(None));
 

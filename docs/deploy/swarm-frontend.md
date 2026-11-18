@@ -27,23 +27,37 @@ the farm takes it). A failed `deploy` makes the release run red; the release sta
 ## The old and the new task of one slot
 
 A frontend stops by draining: it waits for its open work, however long that takes, and only
-then exits. Swarm does not wait that long before it starts the slot's next task, even with
-`order: stop-first` and a long `stop_grace_period`: it starts the new task once the old one has
-stopped or one minute after it told the old one to stop, whichever comes first (the grace
-period only puts off the kill). So a drain longer than a minute overlaps the new task, and both
-name the slot's `file://` history directory, which the old process holds (`LOCK`) until it
-exits. The new frontend waits for it: it logs `the history directory is still locked, waiting
-to try again` at every attempt, opens the directory once the old process has exited, and only
-then serves and passes its health check. A stop signal during the wait (a rollback, for one)
-ends it with exit 0. Every other start error still exits 2 at once.
+then exits. With `order: start-first` Swarm starts the slot's new task first and tells the old
+one to stop once the new one is healthy; with `order: stop-first` it starts the new task once
+the old one has stopped or one minute after it told the old one to stop, whichever comes first
+(the grace period only puts off the kill). So a drain longer than a minute overlaps the new task
+under either order, and under `start-first` the overlap is the whole point: the new task must
+start, and pass its health check, while the old one is running.
 
-What still bounds the overlap is the service's health check: a new task that has not passed it
-by the end of its `start_period` and retries is replaced, and that counts as a failed update. A
-`start_period` shorter than the longest drain the frontends see makes such an update roll back.
+Both tasks name the slot's `file://` history directory, and that works: the directory is opened
+shared. A shared open takes no `LOCK`; each process keeps its own file under `instances/` locked
+for as long as it runs, and its temporary files, in `tmp-shared/`, carry its name. Every key a history
+writer writes carries its own writer id (its start time in microseconds), so the old and the new
+task never write one key, and nothing in history deletes, evicts or lists the directory. The new
+task starts, serves and passes its health check beside the old one, and each of them goes on
+writing under its own id until the old one has drained and exited. A new task's open removes
+the leftovers of a task that is gone (its `tmp-shared/` files and its `instances/` file) and leaves a
+running task's alone. The cold store's directory is a different matter: it is evicted, scanned
+and cleaned, and one process owns it (`LOCK`).
+
+A release that still opens the directory exclusively (the one before this) holds `LOCK` for as
+long as it runs. The new task opens the directory beside it all the same, since a shared open
+does not look at `LOCK`. The reverse costs nothing: an old-release process that starts beside a
+new one (a rollback, or a task restarted by Swarm) empties `tmp/` as it opens, and a new task
+keeps its temporary files in `tmp-shared/`, which the old release never lists or empties, so
+no write of the new task is cut and the old process's open does not fail.
+
+What bounds the overlap is the service's health check: a new task that has not passed it by the
+end of its `start_period` and retries is replaced, and that counts as a failed update.
 
 With an `s3://` `--history-objects` (`conditional-put=true`, the key pair in
-`--history-credentials-file`) there is no `LOCK` and no wait: the old and the new task write the
-one store at once, each under its own writer id
+`--history-credentials-file`) the old and the new task write the
+one store at once in the same way, each under its own writer id
 ([frontends-behind-a-load-balancer.md](frontends-behind-a-load-balancer.md#what-the-frontends-share)),
 and the new task serves as soon as it has started. When a frontend stops, after its drain, its
 history writer closes every build it recorded and writes until nothing is left or its stores stop
@@ -51,6 +65,46 @@ taking writes, for at most five seconds, so a rolling update leaves the old task
 History is not all an update with `order: start-first` needs: the old and the new frontend must
 also share the executor's jobs, which is the subject of
 [docs/design/n-frontends.md](../design/n-frontends.md) (section 9 gives the order of the steps).
+
+## A release that removes flags
+
+A frontend refuses a `--config` file that still sets a flag its release removed: the start exits
+2 and names every such key of the file at once, each as a line `removed key <table>.<key> in <file>: ...`,
+and `--check` says the same without starting. Under `order: start-first` the old task keeps
+serving and the update fails on the new task, so nothing is lost but the update; still, the
+file has to change before the release can run.
+
+The deploy does not check the service's file against the new image before it updates the
+service: docker-swarm-updater has no step that runs the new image first. So, before a release
+whose notes list flags under "Config migration" (the flags it removed that the release before it
+still took, read from the two builds), delete those keys from the service's file, and check the
+file with the new image, mounted where the service mounts it:
+
+```text
+docker run --rm --volume <the service's kbf.toml>:/etc/kbf/kbf.toml:ro <the release's image> --config /etc/kbf/kbf.toml --check
+```
+
+(the image's entry point is `kbf --mode=frontend`; arguments after the image replace its default
+`--config /etc/kbf/kbf.toml`, so the command names the file again). It exits 0 when the release takes the file, and 2 naming every key it
+refuses. A host whose frontend container is switched by `kbf-host-install --frontend-container`
+needs none of this: the switch runs that check itself, with the container's own mounts, and
+refuses (`config_invalid`) before it drains or changes anything
+([host-install.md](host-install.md#a-frontend-container)).
+
+## The state schema
+
+A frontend with a `postgres://` `--state-store` brings the database to the schema its build needs
+itself, before it serves: after the store is open and before the listeners accept, it runs the step
+`kbf boot-check --mode=frontend` runs (expand migrations only, under a lock, waiting at most 30
+seconds for it), over its own `--state-store` connection. A database already at that schema is left
+alone, and one line of the log says what the step did (`migrated the schema from 3 to 4`). Nothing
+else has to run before a release that raises the schema: no job, no manual `boot-check`. The
+database role the frontend connects as must be allowed to create the tables; if it is not, the
+schema is busy past the wait, or a pending migration is a `contract` step, the start exits 2 naming
+the cause and `kbf boot-check --mode=frontend`, and Swarm's rollback applies. In a start-first
+update the new task migrates while the old one serves; that is safe because a step only adds, and
+the previous release runs on a schema one step ahead
+([the N and N-1 design](../design/kbf-cicd.md)).
 
 ## Turn it on
 

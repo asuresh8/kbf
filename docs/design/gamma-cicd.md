@@ -126,9 +126,8 @@ pipeline run once, only when every failed job is an artifact build or move job.
 `release.yml` is started by one event: the completion of a `pipeline` run (`workflow_run`).
 `plan` checks that run's conclusion (`success`), event (`push`), branch (`main`) and
 repository. Every other job needs `plan`, and all of them but `verify` repeat the check. It has its own concurrency group, `release-main`, which never cancels. When
-`plan` finds the range since the last tag is docs only, or changes the pipeline itself,
-the jobs after `plan` are skipped and the run is green. The code ships with the next
-release. A commit that the highest release tag is already after (an older run that
+`plan` finds the range since the last tag is docs only, the jobs after `plan` are
+skipped and the run is green. A commit that changes the pipeline releases itself. A commit that the highest release tag is already after (an older run that
 completes late) is also a green no-op, so the newest release is the only one deployed.
 
 The workflow has no secret but the release bot's GitHub App key (`RELEASE_BOT_PRIVATE_KEY`,
@@ -143,7 +142,7 @@ The job table below lists the jobs in the order they run. The repository lint `g
 <!-- release-jobs: begin -->
 | job | needs | token and rights | what it does | what it gates |
 |---|---|---|---|---|
-| `plan` | none | `GITHUB_TOKEN`: `contents: read`, `actions: read` | `cargo xtask release plan`: the next version (`VERSION` holds `MAJOR.MINOR`, the patch is one above the highest tag), and whether the range is code, site or pipeline. The variable `RELEASE_FREEZE` refuses every release while it is set. | every later job: they run only when the range is code and does not change the pipeline |
+| `plan` | none | `GITHUB_TOKEN`: `contents: read`, `actions: read` | `cargo xtask release plan`: the next version (`VERSION` holds `MAJOR.MINOR`, the patch is one above the highest tag), and whether the range is code or site. The variable `RELEASE_FREEZE` refuses every release while it is set. | every later job: they run only when the range is code |
 | `verify` | `plan` | `contents: read`, `actions: read`, `attestations: read` | refuses a commit that is not on `main`. Downloads the pipeline run's assets, sums and bundles, checks `SHA256SUMS`, and verifies every attestation online and every bundle offline, as a host does. Rebuilds nothing. | `tag`, `notes`, `publish` |
 | `tag` | `plan`, `verify` | `contents: read`, plus a release-bot App token (`contents: write`, this repository), in environment `release` | writes the Beta record and creates the annotated tag, create-only. Only the release bot may create a `v*` tag. | `notes`, `publish`, `bump` |
 | `notes` | `plan`, `verify`, `tag` | `contents: read`, `actions: read`, `attestations: read` | `release verify` (the tag names this commit, and the set hash), the identity of this release and the one before it (after their attestations are verified), and the release notes | `publish` |
